@@ -1,0 +1,38 @@
+[package]
+name = "signal-tui"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "A fast, keyboard-first Signal client for the terminal"
+repository = "https://github.com/coderdojo/signal-cli"
+
+[[bin]]
+name = "signal"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4.5", features = ["derive"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+directories = "6.0"
+futures = "0.3"
+presage = { git = "https://github.com/whisperfish/presage", rev = "1369a7e43d60df066dfd5b89ee2d1f355ef86c13" }
+presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "1369a7e43d60df066dfd5b89ee2d1f355ef86c13" }
+qr2term = "0.3"
+ratatui = "0.29"
+tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3.20"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+
+[patch.crates-io]
+curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }
+libsqlite3-sys = { version = "0.36.0", git = "https://github.com/whisperfish/rusqlite", rev = "2a42b3354c9194700d08aa070f70a131a470e7dc" }
