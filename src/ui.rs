@@ -74,6 +74,17 @@ fn logo<'a>() -> Line<'a> {
     ])
 }
 
+fn status_spans(status: &str) -> Vec<Span<'_>> {
+    if status == "Connected" {
+        vec![
+            Span::styled("● ", Style::default().fg(Color::Green)),
+            Span::styled(status, Style::default().fg(MUTED)),
+        ]
+    } else {
+        vec![Span::styled(status, Style::default().fg(MUTED))]
+    }
+}
+
 fn draw_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
     let (header, body, footer) = shell(frame);
     frame.render_widget(
@@ -115,17 +126,18 @@ fn draw_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
     let mut state =
         ListState::default().with_selected((!app.conversations.is_empty()).then_some(app.selected));
     frame.render_stateful_widget(list, body, &mut state);
+    let mut footer_spans = vec![
+        Span::styled("↑↓", Style::default().fg(Color::White)),
+        Span::styled(" move   ", Style::default().fg(MUTED)),
+        Span::styled("enter", Style::default().fg(Color::White)),
+        Span::styled(" open   ", Style::default().fg(MUTED)),
+        Span::styled("r", Style::default().fg(Color::White)),
+        Span::styled(" refresh   ", Style::default().fg(MUTED)),
+    ];
+    footer_spans.extend(status_spans(&app.status));
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("↑↓", Style::default().fg(Color::White)),
-            Span::styled(" move   ", Style::default().fg(MUTED)),
-            Span::styled("enter", Style::default().fg(Color::White)),
-            Span::styled(" open   ", Style::default().fg(MUTED)),
-            Span::styled("r", Style::default().fg(Color::White)),
-            Span::styled(" refresh   ", Style::default().fg(MUTED)),
-            Span::styled(&app.status, Style::default().fg(MUTED)),
-        ]))
-        .block(Block::default().padding(Padding::horizontal(1))),
+        Paragraph::new(Line::from(footer_spans))
+            .block(Block::default().padding(Padding::horizontal(1))),
         footer,
     );
 }
@@ -217,19 +229,20 @@ fn draw_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
     let cursor_x = input.x + 2 + cursor_prefix.chars().count() as u16;
     frame.set_cursor_position((cursor_x.min(input.right().saturating_sub(2)), input.y + 1));
 
+    let mut footer_spans = vec![
+        Span::styled("enter", Style::default().fg(Color::White)),
+        Span::styled(" send   ", Style::default().fg(MUTED)),
+        Span::styled("esc", Style::default().fg(Color::White)),
+        Span::styled(" chats   ", Style::default().fg(MUTED)),
+        Span::styled("pgup/dn", Style::default().fg(Color::White)),
+        Span::styled(" scroll   ", Style::default().fg(MUTED)),
+        Span::styled("ctrl-c", Style::default().fg(Color::White)),
+        Span::styled(" quit   ", Style::default().fg(MUTED)),
+    ];
+    footer_spans.extend(status_spans(&app.status));
     frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("enter", Style::default().fg(Color::White)),
-            Span::styled(" send   ", Style::default().fg(MUTED)),
-            Span::styled("esc", Style::default().fg(Color::White)),
-            Span::styled(" chats   ", Style::default().fg(MUTED)),
-            Span::styled("pgup/dn", Style::default().fg(Color::White)),
-            Span::styled(" scroll   ", Style::default().fg(MUTED)),
-            Span::styled("ctrl-c", Style::default().fg(Color::White)),
-            Span::styled(" quit   ", Style::default().fg(MUTED)),
-            Span::styled(&app.status, Style::default().fg(MUTED)),
-        ]))
-        .block(Block::default().padding(Padding::horizontal(1))),
+        Paragraph::new(Line::from(footer_spans))
+            .block(Block::default().padding(Padding::horizontal(1))),
         footer,
     );
 }

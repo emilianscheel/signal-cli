@@ -19,7 +19,7 @@ directories = "6.0"
 futures = "0.3"
 presage = { git = "https://github.com/whisperfish/presage", rev = "1369a7e43d60df066dfd5b89ee2d1f355ef86c13" }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "1369a7e43d60df066dfd5b89ee2d1f355ef86c13" }
-qr2term = "0.3"
+qrcode = { version = "0.14", default-features = false }
 ratatui = "0.29"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing = "0.1"

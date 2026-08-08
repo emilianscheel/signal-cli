@@ -14,6 +14,7 @@ use presage::{
     Manager,
 };
 use presage_store_sqlite::SqliteStore;
+use qrcode::{Color as QrColor, QrCode};
 use tokio::sync::mpsc;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,6 +56,39 @@ pub enum NetworkEvent {
     Error(String),
 }
 
+fn transparent_qr(value: &str) -> Result<String> {
+    const QUIET_ZONE: usize = 2;
+
+    let code = QrCode::new(value.as_bytes()).context("encode provisioning QR code")?;
+    let width = code.width();
+    let row_width = (width + QUIET_ZONE * 2) * 2 + 1;
+    let mut output = String::with_capacity(row_width * (width + QUIET_ZONE * 2));
+    let empty_row = " ".repeat((width + QUIET_ZONE * 2) * 2);
+
+    for _ in 0..QUIET_ZONE {
+        output.push_str(&empty_row);
+        output.push('\n');
+    }
+    for y in 0..width {
+        output.push_str(&" ".repeat(QUIET_ZONE * 2));
+        for x in 0..width {
+            output.push_str(if code[(x, y)] == QrColor::Dark {
+                "██"
+            } else {
+                "  "
+            });
+        }
+        output.push_str(&" ".repeat(QUIET_ZONE * 2));
+        output.push('\n');
+    }
+    for _ in 0..QUIET_ZONE {
+        output.push_str(&empty_row);
+        output.push('\n');
+    }
+
+    Ok(output)
+}
+
 pub async fn link_device(
     store: SqliteStore,
     device_name: String,
@@ -67,17 +101,13 @@ pub async fn link_device(
         Manager::link_secondary_device(store, SignalServers::Production, device_name, tx),
         async move {
             let url = rx.await.context("Signal provisioning was cancelled")?;
-            println!("Scan this code with your iPhone:\n");
-            qr2term::print_qr(url.to_string()).context("render provisioning QR code")?;
-            println!("\nWaiting for your iPhone…");
+            print!("{}", transparent_qr(url.as_str())?);
             Ok::<_, anyhow::Error>(())
         },
     )
     .await;
     shown?;
-    let manager = manager.context("link this terminal as a Signal device")?;
-    println!("Linked. Starting Signal…");
-    Ok(manager)
+    manager.context("link this terminal as a Signal device")
 }
 
 pub async fn conversations(
@@ -266,4 +296,16 @@ pub fn start_receiver(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::transparent_qr;
+
+    #[test]
+    fn qr_uses_terminal_background_without_ansi_colors() {
+        let rendered = transparent_qr("sgnl://linkdevice?uuid=test&pub_key=test").unwrap();
+        assert!(rendered.contains("██"));
+        assert!(!rendered.contains("\u{1b}["));
+    }
 }
