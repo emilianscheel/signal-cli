@@ -44,6 +44,7 @@ impl TerminalSession {
         self.terminal.draw(|frame| match app.screen {
             Screen::Conversations => draw_conversations(frame, app),
             Screen::Chat => draw_chat(frame, app),
+            Screen::DisconnectConfirm => draw_disconnect_confirm(frame),
         })?;
         Ok(())
     }
@@ -150,11 +151,58 @@ fn draw_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
         Span::styled(" open   ", muted()),
         Span::styled("r", primary()),
         Span::styled(" refresh   ", muted()),
+        Span::styled("d", primary()),
+        Span::styled(" Disconnect   ", muted()),
     ];
     footer_spans.extend(status_spans(&app.status));
     frame.render_widget(
         Paragraph::new(Line::from(footer_spans))
             .block(Block::default().padding(Padding::horizontal(1))),
+        footer,
+    );
+}
+
+fn draw_disconnect_confirm(frame: &mut ratatui::Frame<'_>) {
+    let (header, body, footer) = shell(frame);
+    frame.render_widget(
+        Paragraph::new(logo()).block(Block::default().padding(Padding::horizontal(1))),
+        header,
+    );
+
+    let warning = Text::from(vec![
+        Line::styled(
+            "Disconnect Signal CLI?",
+            primary().add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        Line::styled(
+            "This removes local credentials, sessions, contacts, groups, and messages.",
+            muted(),
+        ),
+        Line::styled(
+            "Afterward, also remove “Signal CLI” on your iPhone under Settings → Linked Devices.",
+            muted(),
+        ),
+    ]);
+    frame.render_widget(
+        Paragraph::new(warning).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .title(" Confirm ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Red))
+                .padding(Padding::new(2, 2, 1, 1)),
+        ),
+        body,
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled("y", Style::default().fg(Color::Red)),
+            Span::styled(" Disconnect and erase local data   ", muted()),
+            Span::styled("esc/n", primary()),
+            Span::styled(" Cancel", muted()),
+        ]))
+        .block(Block::default().padding(Padding::horizontal(1))),
         footer,
     );
 }

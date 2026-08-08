@@ -61,6 +61,7 @@ The database is stored in the operating system's local data directory. Use
 | Chats | `↑`/`↓` or `j`/`k` | Select a conversation |
 | Chats | `Enter` | Open the selected conversation |
 | Chats | `r` | Reload synced contacts and groups |
+| Chats | `d`, then `y` | Erase local account data and disconnect |
 | Chat | `Enter` | Send the current message |
 | Chat | `PageUp`/`PageDown` | Scroll message history |
 | Chat | `Esc` | Return to the chat list |
@@ -72,6 +73,11 @@ The local database contains linked-device credentials and decrypted message
 content. Keep it on a trusted disk and do not copy or commit it. Removing it
 requires linking the CLI again. You can revoke the client at any time from
 Signal's **Linked Devices** screen.
+
+The in-app disconnect action erases all local credentials, protocol sessions,
+contacts, groups, and messages after confirmation. Signal does not allow a
+secondary device to revoke itself, so also remove **Signal CLI** from the
+iPhone's **Linked Devices** screen to complete server-side revocation.
 
 This is an independent, unofficial client and is not affiliated with Signal.
 The current release focuses on fast text chat; attachments, reactions, typing

@@ -31,6 +31,23 @@ fn protect_local_data(_path: &std::path::Path, _protect_parent: bool) -> Result<
     Ok(())
 }
 
+fn remove_local_data(path: &std::path::Path) -> Result<()> {
+    for suffix in ["", "-wal", "-shm"] {
+        let mut candidate = path.as_os_str().to_os_string();
+        candidate.push(suffix);
+        let candidate = PathBuf::from(candidate);
+        match std::fs::remove_file(&candidate) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("remove local data {}", candidate.display()));
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Parser)]
 #[command(
     name = "signal",
@@ -99,7 +116,7 @@ async fn main() -> Result<()> {
         .context("restrict permissions on the local Signal database")?;
 
     let local = tokio::task::LocalSet::new();
-    local
+    let disconnected = local
         .run_until(async move {
             let manager: Manager<SqliteStore, Registered> =
                 match Manager::load_registered(store.clone()).await {
@@ -109,12 +126,17 @@ async fn main() -> Result<()> {
 
             App::new(manager).run().await
         })
-        .await
+        .await?;
+
+    if disconnected {
+        remove_local_data(&path)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{data_path, protect_local_data};
+    use super::{data_path, protect_local_data, remove_local_data};
     use std::path::PathBuf;
 
     #[test]
@@ -147,5 +169,20 @@ mod tests {
             std::fs::metadata(database).unwrap().permissions().mode() & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn disconnect_removes_database_and_sidecars() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("signal.db");
+        std::fs::write(&database, "database").unwrap();
+        std::fs::write(directory.path().join("signal.db-wal"), "wal").unwrap();
+        std::fs::write(directory.path().join("signal.db-shm"), "shm").unwrap();
+
+        remove_local_data(&database).unwrap();
+
+        assert!(!database.exists());
+        assert!(!directory.path().join("signal.db-wal").exists());
+        assert!(!directory.path().join("signal.db-shm").exists());
     }
 }

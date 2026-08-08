@@ -1,7 +1,11 @@
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
-use presage::{manager::Registered, Manager};
+use presage::{
+    manager::Registered,
+    store::{ContentsStore, StateStore, Store},
+    Manager,
+};
 use presage_store_sqlite::SqliteStore;
 use tokio::sync::mpsc;
 
@@ -14,6 +18,7 @@ use crate::{
 pub enum Screen {
     Conversations,
     Chat,
+    DisconnectConfirm,
 }
 
 pub struct App {
@@ -27,6 +32,8 @@ pub struct App {
     pub screen: Screen,
     pub status: String,
     pub sending: bool,
+    receiver: Option<tokio::task::JoinHandle<()>>,
+    disconnected: bool,
 }
 
 impl App {
@@ -42,6 +49,8 @@ impl App {
             screen: Screen::Conversations,
             status: "Connecting…".into(),
             sending: false,
+            receiver: None,
+            disconnected: false,
         }
     }
 
@@ -103,6 +112,22 @@ impl App {
         self.sending = false;
     }
 
+    async fn disconnect(&mut self) -> Result<()> {
+        if let Some(receiver) = self.receiver.take() {
+            receiver.abort();
+            let _ = receiver.await;
+        }
+        let mut store = self.manager.store().clone();
+
+        // Secondary Signal devices cannot revoke themselves server-side. Remove
+        // every locally usable credential first, then erase cached content.
+        StateStore::clear_registration(&mut store).await?;
+        ContentsStore::clear_contents(&mut store).await?;
+        Store::clear(&mut store).await?;
+        self.disconnected = true;
+        Ok(())
+    }
+
     async fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
         if key.kind != crossterm::event::KeyEventKind::Press {
             return Ok(false);
@@ -120,6 +145,7 @@ impl App {
                 }
                 KeyCode::Enter => self.open_selected().await?,
                 KeyCode::Char('r') => self.refresh_conversations().await?,
+                KeyCode::Char('d') => self.screen = Screen::DisconnectConfirm,
                 _ => {}
             },
             Screen::Chat => match key.code {
@@ -168,6 +194,17 @@ impl App {
                 KeyCode::End => self.cursor = self.input.len(),
                 _ => {}
             },
+            Screen::DisconnectConfirm => match key.code {
+                KeyCode::Char('y') => match self.disconnect().await {
+                    Ok(()) => return Ok(true),
+                    Err(error) => {
+                        self.status = format!("Disconnect failed: {error:#}");
+                        self.screen = Screen::Conversations;
+                    }
+                },
+                KeyCode::Esc | KeyCode::Char('n') => self.screen = Screen::Conversations,
+                _ => {}
+            },
         }
         Ok(false)
     }
@@ -192,10 +229,10 @@ impl App {
         Ok(())
     }
 
-    pub async fn run(mut self) -> Result<()> {
+    pub async fn run(mut self) -> Result<bool> {
         self.refresh_conversations().await?;
         let (network_tx, mut network_rx) = mpsc::unbounded_channel();
-        backend::start_receiver(self.manager.clone(), network_tx);
+        self.receiver = Some(backend::start_receiver(self.manager.clone(), network_tx));
         let mut terminal = TerminalSession::start()?;
         let mut events = EventStream::new();
 
@@ -211,7 +248,7 @@ impl App {
                 Some(event) = network_rx.recv() => self.handle_network(event).await?,
             }
         }
-        Ok(())
+        Ok(self.disconnected)
     }
 }
 
@@ -222,5 +259,6 @@ mod tests {
     #[test]
     fn screens_are_distinct() {
         assert_ne!(Screen::Chat, Screen::Conversations);
+        assert_ne!(Screen::DisconnectConfirm, Screen::Conversations);
     }
 }

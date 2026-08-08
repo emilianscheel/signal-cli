@@ -270,7 +270,7 @@ pub async fn send(
 pub fn start_receiver(
     mut manager: Manager<SqliteStore, Registered>,
     tx: mpsc::UnboundedSender<NetworkEvent>,
-) {
+) -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_local(async move {
         let stream = match manager.receive_messages().await {
             Ok(stream) => stream,
@@ -295,7 +295,7 @@ pub fn start_receiver(
                 break;
             }
         }
-    });
+    })
 }
 
 #[cfg(test)]
