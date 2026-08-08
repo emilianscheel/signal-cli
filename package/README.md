@@ -208,5 +208,5 @@ AGPL-3.0-only.
 ## Release
 
 ```sh
-git tag -a v0.3.1 -m "v0.3.1" && git push origin main v0.3.1
+git tag -a v0.3.2 -m "v0.3.2" && git push origin main v0.3.2
 ```

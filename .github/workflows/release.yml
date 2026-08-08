@@ -27,7 +27,7 @@ jobs:
           repo-token: ${{ github.token }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: clippy, rustfmt
 
@@ -87,7 +87,7 @@ jobs:
           repo-token: ${{ github.token }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.93.0
         with:
           targets: ${{ matrix.target }}
 

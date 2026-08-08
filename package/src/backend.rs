@@ -319,7 +319,7 @@ pub async fn conversations(
         });
     }
 
-    result.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+    result.sort_by_key(|conversation| conversation.title.to_lowercase());
     Ok(result)
 }
 
