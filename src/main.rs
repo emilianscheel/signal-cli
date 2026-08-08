@@ -13,7 +13,9 @@ use directories::ProjectDirs;
 use presage::{manager::Registered, model::identity::OnNewIdentity, Manager};
 use presage_store_sqlite::SqliteStore;
 
-use crate::{app::App, backend::link_device, preferences::PreferencesStore};
+use crate::{
+    app::App, attachments::AttachmentCache, backend::link_device, preferences::PreferencesStore,
+};
 
 #[cfg(unix)]
 fn protect_local_data(path: &std::path::Path, protect_parent: bool) -> Result<()> {
@@ -171,7 +173,13 @@ async fn run(args: Args) -> Result<()> {
                 };
 
             if let Some(command) = args.command {
-                cli::run(&mut manager, command, json_output).await?;
+                cli::run(
+                    &mut manager,
+                    command,
+                    json_output,
+                    AttachmentCache::new(app_attachment_cache_path),
+                )
+                .await?;
                 Ok(false)
             } else {
                 App::new(
@@ -295,6 +303,14 @@ mod tests {
         assert!(matches!(
             send.command,
             Some(Command::Send { message, .. }) if message == "  exact text  "
+        ));
+
+        let download =
+            Args::try_parse_from(["signal", "download", "Annual Report", "--json"]).unwrap();
+        assert!(download.json);
+        assert!(matches!(
+            download.command,
+            Some(Command::Download { file }) if file == "Annual Report"
         ));
     }
 

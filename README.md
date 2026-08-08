@@ -17,6 +17,7 @@ Code.
 - Local message history (up to the latest 250 messages per chat)
 - Compact inline images in terminals with Kitty, iTerm2, or Sixel graphics support
 - Filenames, media types, and sizes for videos, PDFs, and other attachments
+- Authenticated attachment downloads by stable ID or filename query
 - Scriptable chat listing, reading, sending, and cross-chat briefs
 - Human-readable date filters and JSON output for automation
 - Unicode editing and keyboard-only navigation
@@ -63,6 +64,8 @@ signal read emilian --since yesterday --until now --limit 30
 signal send emilian "See you soon"
 signal brief
 signal brief 10
+signal download "annual report"
+signal download 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
 
 `list` prints all synced contacts and groups, including chats without local
@@ -75,7 +78,22 @@ one explicitly.
 `read` returns the latest 15 matching messages in chronological order by
 default. Use `--limit N` to change that maximum. `brief` returns the latest 15
 messages across all chats, newest first, or the positional count supplied as
-`signal brief N`.
+`signal brief N`. Their human and JSON outputs include each attachment's
+filename, size, media type, and downloadable ID when its Signal pointer is
+complete.
+
+`download` searches attachment filenames case-insensitively across all locally
+stored history, independent of the `read` and TUI message limits. An exact
+64-character attachment ID takes precedence over filename matching. If a query
+matches multiple distinct files, nothing is downloaded and the matching IDs,
+names, sizes, chats, and timestamps are listed. Repeated appearances of the
+same ID count as one file.
+
+Downloads are authenticated and decrypted by Signal's attachment protocol and
+saved in the current directory. Signal-provided path components are stripped.
+Unnamed files receive a digest-based name, and an existing filename is never
+overwritten: subsequent downloads use names such as `report (1).pdf`. On Unix,
+downloaded files are created with `0600` permissions.
 
 Date bounds use `--since` and `--until`. `since` is inclusive; a date-only
 `until` includes that entire local calendar day, while a date and time is an
@@ -100,6 +118,7 @@ Add `--json` before or after a command for stable machine-readable output:
 ```sh
 signal --json list
 signal brief 10 --json
+signal download "annual report" --json
 ```
 
 Command results are written to stdout. Provisioning, freshness warnings, and
@@ -112,9 +131,9 @@ send operation.
 Only history already delivered to this linked device is available. Signal does
 not offer linked clients a way to fetch arbitrary older server history.
 Text-containing messages are printed as text. JSON output includes structured
-attachment metadata; human-readable one-shot output reports the attachment
-count. Other non-text messages such as stickers, reactions, edits, polls,
-calls, and stories are shown with concise placeholders.
+attachment metadata; human-readable `read` and `brief` output includes one file
+line per attachment. Other non-text messages such as stickers, reactions,
+edits, polls, calls, and stories are shown with concise placeholders.
 
 ## First run
 
@@ -169,9 +188,9 @@ iPhone's **Linked Devices** screen to complete server-side revocation.
 
 This is an independent, unofficial client and is not affiliated with Signal.
 The current release supports receiving attachment previews and metadata but
-does not yet send, save, open, or play attachments. Reactions, typing
-indicators, safety-number management, and disappearing-message cleanup are not
-yet exposed in the UI.
+does not yet send, open, or play attachments. Attachments can be saved through
+the one-shot `download` command. Reactions, typing indicators, safety-number
+management, and disappearing-message cleanup are not yet exposed in the UI.
 
 ## Development checks
 

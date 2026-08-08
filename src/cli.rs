@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     io::{self, Write},
     time::Duration,
 };
@@ -13,7 +14,10 @@ use presage::{manager::Registered, Manager};
 use presage_store_sqlite::SqliteStore;
 use serde_json::{json, Value};
 
-use crate::backend::{self, ChatMessage, Conversation};
+use crate::{
+    attachments::{self, AttachmentCache},
+    backend::{self, AttachmentOccurrence, ChatAttachment, ChatMessage, Conversation},
+};
 
 const DEFAULT_LIMIT: usize = 15;
 const SYNC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -48,6 +52,11 @@ pub enum Command {
         /// Maximum number of messages to return.
         #[arg(default_value_t = DEFAULT_LIMIT, value_parser = positive_usize)]
         limit: usize,
+    },
+    /// Download one attachment into the current directory.
+    Download {
+        /// Exact file digest or case-insensitive filename fragment.
+        file: String,
     },
 }
 
@@ -213,19 +222,22 @@ fn timestamp(timestamp: u64) -> String {
         .unwrap_or_else(|| timestamp.to_string())
 }
 
+fn attachment_json(attachment: &ChatAttachment) -> Value {
+    json!({
+        "id": attachment.download_id(),
+        "name": attachment.file_name.clone().unwrap_or_else(|| attachments::safe_download_name(attachment)),
+        "content_type": attachment.content_type,
+        "size": attachment.size,
+        "width": attachment.width,
+        "height": attachment.height,
+    })
+}
+
 fn message_json(message: &ChatMessage) -> Value {
     let attachments = message
         .attachments
         .iter()
-        .map(|attachment| {
-            json!({
-                "name": attachment.file_name,
-                "content_type": attachment.content_type,
-                "size": attachment.size,
-                "width": attachment.width,
-                "height": attachment.height,
-            })
-        })
+        .map(attachment_json)
         .collect::<Vec<_>>();
     json!({
         "timestamp": timestamp(message.timestamp),
@@ -237,6 +249,39 @@ fn message_json(message: &ChatMessage) -> Value {
         "attachment_count": message.attachments.len(),
         "attachments": attachments,
     })
+}
+
+fn human_size(size: Option<u32>) -> String {
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let Some(size) = size else {
+        return "unknown size".into();
+    };
+    let mut value = f64::from(size);
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", value as u64, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn print_attachments(message: &ChatMessage) {
+    for attachment in &message.attachments {
+        println!(
+            "    file {}  {}  {}  {}",
+            attachment.download_id().as_deref().unwrap_or("unavailable"),
+            attachment
+                .file_name
+                .clone()
+                .unwrap_or_else(|| attachments::safe_download_name(attachment)),
+            human_size(attachment.size),
+            attachment.content_type.as_deref().unwrap_or("unknown type")
+        );
+    }
 }
 
 fn write_json(value: &Value) -> Result<()> {
@@ -282,6 +327,63 @@ fn resolve_one<'a>(conversations: &'a [Conversation], query: &str) -> Result<&'a
     }
 }
 
+fn resolve_attachment<'a>(
+    catalog: &'a [AttachmentOccurrence],
+    query: &str,
+) -> Result<&'a AttachmentOccurrence> {
+    if query.is_empty() {
+        bail!("file query cannot be empty");
+    }
+    let query_lower = query.to_lowercase();
+    if let Some(exact) = catalog.iter().find(|occurrence| {
+        occurrence
+            .attachment
+            .download_id()
+            .is_some_and(|id| id.eq_ignore_ascii_case(query))
+    }) {
+        return Ok(exact);
+    }
+
+    let mut seen = HashSet::new();
+    let matches = catalog
+        .iter()
+        .filter(|occurrence| {
+            occurrence
+                .attachment
+                .file_name
+                .as_deref()
+                .is_some_and(|name| name.to_lowercase().contains(&query_lower))
+        })
+        .filter(|occurrence| {
+            occurrence
+                .attachment
+                .download_id()
+                .is_some_and(|id| seen.insert(id))
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => bail!("no downloadable file matches {query:?}; use `signal read` or `signal brief` to see file IDs"),
+        [occurrence] => Ok(occurrence),
+        _ => {
+            let choices = matches
+                .iter()
+                .map(|occurrence| {
+                    format!(
+                        "  {}  {}  {}  {}  {}",
+                        occurrence.attachment.download_id().expect("match has an ID"),
+                        occurrence.attachment.display_name(),
+                        human_size(occurrence.attachment.size),
+                        occurrence.chat.title,
+                        timestamp(occurrence.timestamp)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!("multiple files match {query:?}; use one of these IDs:\n{choices}")
+        }
+    }
+}
+
 fn warn_sync(error: &anyhow::Error) {
     eprintln!(
         "warning: Signal synchronization did not complete ({error:#}); using locally cached data"
@@ -292,6 +394,7 @@ pub async fn run(
     manager: &mut Manager<SqliteStore, Registered>,
     command: Command,
     json_output: bool,
+    attachment_cache: AttachmentCache,
 ) -> Result<()> {
     if let Err(error) = backend::sync_pending(manager, SYNC_TIMEOUT).await {
         warn_sync(&error);
@@ -339,6 +442,7 @@ pub async fn run(
                         sender,
                         body_for_human(message)
                     );
+                    print_attachments(message);
                 }
             }
         }
@@ -403,7 +507,48 @@ pub async fn run(
                         sender,
                         body_for_human(message)
                     );
+                    print_attachments(message);
                 }
+            }
+        }
+        Command::Download { file } => {
+            let catalog = backend::attachment_catalog(manager, &conversations).await?;
+            let occurrence = resolve_attachment(&catalog, &file)?;
+            let directory = std::env::current_dir().context("determine current directory")?;
+            let path = attachments::download_to_directory(
+                manager,
+                &attachment_cache,
+                &occurrence.attachment,
+                &directory,
+            )
+            .await?;
+            let id = occurrence
+                .attachment
+                .download_id()
+                .expect("resolved attachment is downloadable");
+            if json_output {
+                write_json(&json!({
+                    "downloaded": true,
+                    "file": {
+                        "id": id,
+                        "name": occurrence.attachment.file_name.clone().unwrap_or_else(|| attachments::safe_download_name(&occurrence.attachment)),
+                        "size": occurrence.attachment.size,
+                        "content_type": occurrence.attachment.content_type,
+                        "chat": chat_json(&occurrence.chat),
+                        "timestamp": timestamp(occurrence.timestamp),
+                        "timestamp_ms": occurrence.timestamp,
+                    },
+                    "path": path,
+                }))?;
+            } else {
+                println!(
+                    "downloaded {} ({}, {}) from {} to {}",
+                    occurrence.attachment.display_name(),
+                    human_size(occurrence.attachment.size),
+                    id,
+                    occurrence.chat.title,
+                    path.display()
+                );
             }
         }
     }
@@ -413,16 +558,51 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use chrono::{Local, TimeZone};
+    use presage::libsignal_service::proto::{attachment_pointer, AttachmentPointer};
 
-    use crate::backend::{ChatMessage, MessageKind};
+    use crate::backend::{
+        AttachmentOccurrence, ChatAttachment, ChatMessage, Conversation, ConversationId,
+        MessageKind,
+    };
 
-    use super::{message_json, parse_date, parse_time_range, positive_usize, ParsedDate};
+    use super::{
+        message_json, parse_date, parse_time_range, positive_usize, resolve_attachment, ParsedDate,
+    };
 
     fn now() -> chrono::DateTime<Local> {
         Local
             .with_ymd_and_hms(2026, 8, 8, 12, 0, 0)
             .single()
             .unwrap()
+    }
+
+    fn occurrence(byte: u8, name: &str, timestamp: u64) -> AttachmentOccurrence {
+        let pointer = AttachmentPointer {
+            digest: Some(vec![byte; 32]),
+            key: Some(vec![byte; 64]),
+            attachment_identifier: Some(attachment_pointer::AttachmentIdentifier::CdnId(1)),
+            file_name: Some(name.into()),
+            size: Some(1_024),
+            ..Default::default()
+        };
+        AttachmentOccurrence {
+            chat: Conversation {
+                id: ConversationId::Group([byte; 32]),
+                title: format!("Chat {byte}"),
+                subtitle: String::new(),
+                group_revision: Some(1),
+            },
+            timestamp,
+            attachment: ChatAttachment {
+                key: hex::encode(pointer.digest.as_ref().unwrap()),
+                file_name: pointer.file_name.clone(),
+                content_type: Some("application/pdf".into()),
+                size: pointer.size,
+                width: None,
+                height: None,
+                pointer,
+            },
+        }
     }
 
     #[test]
@@ -471,17 +651,38 @@ mod tests {
 
     #[test]
     fn json_message_contract_contains_machine_and_human_timestamps() {
+        let file = occurrence(0xab, "Report.pdf", 1).attachment;
         let value = message_json(&ChatMessage {
             timestamp: 1_786_185_000_123,
             mine: true,
             sender: None,
             body: "hello".into(),
             kind: MessageKind::Text,
-            attachments: Vec::new(),
+            attachments: vec![file],
         });
         assert_eq!(value["timestamp_ms"], 1_786_185_000_123_u64);
         assert_eq!(value["direction"], "sent");
         assert_eq!(value["sender"], "you");
         assert_eq!(value["kind"], "text");
+        assert_eq!(value["attachments"][0]["id"], "ab".repeat(32));
+        assert_eq!(value["attachments"][0]["size"], 1_024);
+    }
+
+    #[test]
+    fn file_resolution_prefers_ids_and_deduplicates_repeats() {
+        let newest = occurrence(1, "Report.pdf", 30);
+        let repeated = occurrence(1, "Report.pdf", 20);
+        let other = occurrence(2, "Report-final.pdf", 10);
+        let catalog = vec![newest, repeated, other];
+
+        let id = "01".repeat(32).to_uppercase();
+        assert_eq!(resolve_attachment(&catalog, &id).unwrap().timestamp, 30);
+        assert!(resolve_attachment(&catalog, "report").is_err());
+
+        let only_repeat = &catalog[..2];
+        assert_eq!(
+            resolve_attachment(only_repeat, "REPORT").unwrap().timestamp,
+            30
+        );
     }
 }

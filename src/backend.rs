@@ -91,6 +91,17 @@ impl ChatAttachment {
         self.file_name.as_deref().unwrap_or("attachment")
     }
 
+    pub fn download_id(&self) -> Option<String> {
+        let digest = self
+            .pointer
+            .digest
+            .as_deref()
+            .filter(|digest| digest.len() == 32)?;
+        self.pointer.key.as_deref().filter(|key| key.len() == 64)?;
+        self.pointer.attachment_identifier.as_ref()?;
+        Some(hex::encode(digest))
+    }
+
     pub fn is_supported_image(&self) -> bool {
         matches!(
             self.content_type
@@ -112,6 +123,13 @@ impl ChatAttachment {
                 _ => true,
             }
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct AttachmentOccurrence {
+    pub chat: Conversation,
+    pub timestamp: u64,
+    pub attachment: ChatAttachment,
 }
 
 fn chat_attachments(timestamp: u64, pointers: &[AttachmentPointer]) -> Vec<ChatAttachment> {
@@ -139,6 +157,31 @@ fn chat_attachments(timestamp: u64, pointers: &[AttachmentPointer]) -> Vec<ChatA
             pointer: pointer.clone(),
         })
         .collect()
+}
+
+fn content_attachment_pointers(body: &ContentBody) -> Option<&[AttachmentPointer]> {
+    use presage::libsignal_service::proto::SyncMessage;
+
+    match body {
+        ContentBody::DataMessage(data) => Some(&data.attachments),
+        ContentBody::EditMessage(edit) => edit
+            .data_message
+            .as_ref()
+            .map(|data| data.attachments.as_slice()),
+        ContentBody::SynchronizeMessage(SyncMessage {
+            sent: Some(sent), ..
+        }) => sent
+            .message
+            .as_ref()
+            .map(|data| data.attachments.as_slice())
+            .or_else(|| {
+                sent.edit_message
+                    .as_ref()
+                    .and_then(|edit| edit.data_message.as_ref())
+                    .map(|data| data.attachments.as_slice())
+            }),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -320,6 +363,39 @@ pub async fn latest_messages(
         }
     }
     Ok(messages)
+}
+
+pub async fn attachment_catalog(
+    manager: &Manager<SqliteStore, Registered>,
+    conversations: &[Conversation],
+) -> Result<Vec<AttachmentOccurrence>> {
+    let mut result = Vec::new();
+    for chat in conversations {
+        let iter = manager.store().messages(&chat.id.thread(), ..).await?;
+        for content in iter {
+            let content = content.context("read a stored attachment message")?;
+            let Some(pointers) = content_attachment_pointers(&content.body) else {
+                continue;
+            };
+            let timestamp = content.timestamp();
+            result.extend(
+                chat_attachments(timestamp, pointers)
+                    .into_iter()
+                    .map(|attachment| AttachmentOccurrence {
+                        chat: chat.clone(),
+                        timestamp,
+                        attachment,
+                    }),
+            );
+        }
+    }
+    result.sort_by(|left, right| {
+        right
+            .timestamp
+            .cmp(&left.timestamp)
+            .then_with(|| left.attachment.key.cmp(&right.attachment.key))
+    });
+    Ok(result)
 }
 
 pub fn matching_conversations<'a>(
@@ -579,12 +655,28 @@ pub fn start_receiver(
 
 #[cfg(test)]
 mod tests {
-    use presage::libsignal_service::proto::{data_message, AttachmentPointer, DataMessage};
+    use presage::libsignal_service::{
+        content::ContentBody,
+        proto::{
+            attachment_pointer, data_message, sync_message, AttachmentPointer, DataMessage,
+            EditMessage, SyncMessage,
+        },
+    };
 
     use super::{
-        chat_attachments, data_message_body, matching_conversations, transparent_qr, Conversation,
-        ConversationId, MessageKind,
+        chat_attachments, content_attachment_pointers, data_message_body, matching_conversations,
+        transparent_qr, Conversation, ConversationId, MessageKind,
     };
+
+    fn valid_pointer(byte: u8) -> AttachmentPointer {
+        AttachmentPointer {
+            digest: Some(vec![byte; 32]),
+            key: Some(vec![byte; 64]),
+            attachment_identifier: Some(attachment_pointer::AttachmentIdentifier::CdnId(1)),
+            file_name: Some("report.pdf".into()),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn qr_uses_terminal_background_without_ansi_colors() {
@@ -638,6 +730,59 @@ mod tests {
                 MessageKind::Text,
                 vec![AttachmentPointer::default()]
             ))
+        );
+    }
+
+    #[test]
+    fn download_id_requires_a_complete_pointer() {
+        let attachment = chat_attachments(1, &[valid_pointer(0xab)]).remove(0);
+        assert_eq!(attachment.download_id(), Some("ab".repeat(32)));
+
+        let mut malformed = valid_pointer(1);
+        malformed.key = None;
+        assert_eq!(
+            chat_attachments(1, &[malformed]).remove(0).download_id(),
+            None
+        );
+    }
+
+    #[test]
+    fn attachment_extraction_covers_incoming_outgoing_and_edits() {
+        let pointer = valid_pointer(7);
+        let incoming = ContentBody::DataMessage(DataMessage {
+            attachments: vec![pointer.clone()],
+            ..Default::default()
+        });
+        assert_eq!(
+            content_attachment_pointers(&incoming),
+            Some([pointer.clone()].as_slice())
+        );
+
+        let edited = ContentBody::EditMessage(EditMessage {
+            data_message: Some(DataMessage {
+                attachments: vec![pointer.clone()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            content_attachment_pointers(&edited),
+            Some([pointer.clone()].as_slice())
+        );
+
+        let outgoing = ContentBody::SynchronizeMessage(SyncMessage {
+            sent: Some(sync_message::Sent {
+                message: Some(DataMessage {
+                    attachments: vec![pointer.clone()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        assert_eq!(
+            content_attachment_pointers(&outgoing),
+            Some([pointer].as_slice())
         );
     }
 
