@@ -1,6 +1,6 @@
 use std::{
     collections::HashSet,
-    io::{self, Write},
+    io::{self, IsTerminal, Write},
     time::Duration,
 };
 
@@ -13,6 +13,7 @@ use clap::Subcommand;
 use presage::{manager::Registered, Manager};
 use presage_store_sqlite::SqliteStore;
 use serde_json::{json, Value};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     attachments::{self, AttachmentCache},
@@ -269,21 +270,6 @@ fn human_size(size: Option<u32>) -> String {
     }
 }
 
-fn print_attachments(message: &ChatMessage) {
-    for attachment in &message.attachments {
-        println!(
-            "    file {}  {}  {}  {}",
-            attachment.download_id().as_deref().unwrap_or("unavailable"),
-            attachment
-                .file_name
-                .clone()
-                .unwrap_or_else(|| attachments::safe_download_name(attachment)),
-            human_size(attachment.size),
-            attachment.content_type.as_deref().unwrap_or("unknown type")
-        );
-    }
-}
-
 fn write_json(value: &Value) -> Result<()> {
     let stdout = io::stdout();
     let mut output = stdout.lock();
@@ -292,20 +278,107 @@ fn write_json(value: &Value) -> Result<()> {
     Ok(())
 }
 
-fn body_for_human(message: &ChatMessage) -> String {
-    let mut body = message.body.replace('\n', "\n    ");
-    if !message.attachments.is_empty() {
-        let noun = if message.attachments.len() == 1 {
-            "attachment"
-        } else {
-            "attachments"
-        };
-        if !body.is_empty() {
-            body.push(' ');
-        }
-        body.push_str(&format!("[{0} {noun}]", message.attachments.len()));
+#[derive(Debug, PartialEq, Eq)]
+struct HumanMessageRow {
+    datetime: String,
+    name: String,
+    content: Vec<String>,
+    incoming: bool,
+}
+
+fn short_timestamp(timestamp: u64) -> String {
+    i64::try_from(timestamp)
+        .ok()
+        .and_then(|timestamp| Local.timestamp_millis_opt(timestamp).single())
+        .map(|datetime| datetime.format("%d %b %H:%M").to_string())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+fn message_content(message: &ChatMessage) -> Vec<String> {
+    let mut content = if message.body.is_empty() {
+        Vec::new()
+    } else {
+        message.body.split('\n').map(str::to_string).collect()
+    };
+    content.extend(message.attachments.iter().map(|attachment| {
+        format!(
+            "file {} · {} · {} · {}",
+            attachment.download_id().as_deref().unwrap_or("unavailable"),
+            attachment
+                .file_name
+                .clone()
+                .unwrap_or_else(|| attachments::safe_download_name(attachment)),
+            human_size(attachment.size),
+            attachment.content_type.as_deref().unwrap_or("unknown type")
+        )
+    }));
+    if content.is_empty() {
+        content.push(String::new());
     }
-    body
+    content
+}
+
+fn message_row(message: &ChatMessage, name: String) -> HumanMessageRow {
+    HumanMessageRow {
+        datetime: short_timestamp(message.timestamp),
+        name,
+        content: message_content(message),
+        incoming: !message.mine,
+    }
+}
+
+fn pad_to_width(value: &str, width: usize) -> String {
+    let padding = width.saturating_sub(UnicodeWidthStr::width(value));
+    format!("{value}{}", " ".repeat(padding))
+}
+
+fn blue(value: String, enabled: bool) -> String {
+    if enabled && !value.is_empty() {
+        format!("\x1b[38;2;70;130;255m{value}\x1b[0m")
+    } else {
+        value
+    }
+}
+
+fn color_enabled() -> bool {
+    io::stdout().is_terminal()
+        && std::env::var_os("NO_COLOR").is_none()
+        && !std::env::var("TERM").is_ok_and(|term| term == "dumb")
+}
+
+fn render_message_rows(rows: &[HumanMessageRow], color: bool) -> String {
+    let datetime_width = rows
+        .iter()
+        .map(|row| UnicodeWidthStr::width(row.datetime.as_str()))
+        .max()
+        .unwrap_or(0);
+    let name_width = rows
+        .iter()
+        .map(|row| UnicodeWidthStr::width(row.name.as_str()))
+        .max()
+        .unwrap_or(0);
+    let mut output = String::new();
+    for row in rows {
+        for (index, content) in row.content.iter().enumerate() {
+            let datetime = if index == 0 {
+                pad_to_width(&row.datetime, datetime_width)
+            } else {
+                " ".repeat(datetime_width)
+            };
+            let name = if index == 0 {
+                pad_to_width(&row.name, name_width)
+            } else {
+                " ".repeat(name_width)
+            };
+            output.push_str(&datetime);
+            output.push_str("  ");
+            output.push_str(&blue(name, color && row.incoming));
+            output.push_str("  ");
+            output.push_str(&blue(content.clone(), color && row.incoming));
+            output.push('\n');
+        }
+    }
+    output
 }
 
 fn resolve_one<'a>(conversations: &'a [Conversation], query: &str) -> Result<&'a Conversation> {
@@ -429,21 +502,19 @@ pub async fn run(
                     &json!({ "chat": chat_json(chat), "messages": messages.iter().map(message_json).collect::<Vec<_>>() }),
                 )?;
             } else {
-                println!("{}  {}", chat.title, chat.id.stable_id());
-                for message in &messages {
-                    let sender = if message.mine {
-                        "you"
-                    } else {
-                        message.sender.as_deref().unwrap_or("unknown")
-                    };
-                    println!(
-                        "{}  {}: {}",
-                        timestamp(message.timestamp),
-                        sender,
-                        body_for_human(message)
-                    );
-                    print_attachments(message);
-                }
+                println!("{}  {}\n", chat.title, chat.id.stable_id());
+                let rows = messages
+                    .iter()
+                    .map(|message| {
+                        let name = if message.mine {
+                            "you".to_string()
+                        } else {
+                            message.sender.clone().unwrap_or_else(|| "unknown".into())
+                        };
+                        message_row(message, name)
+                    })
+                    .collect::<Vec<_>>();
+                print!("{}", render_message_rows(&rows, color_enabled()));
             }
         }
         Command::Send { chat, message } => {
@@ -494,21 +565,21 @@ pub async fn run(
                     .collect::<Vec<_>>();
                 write_json(&json!({ "messages": messages }))?;
             } else {
-                for (chat, message) in &messages {
-                    let sender = if message.mine {
-                        "you"
-                    } else {
-                        message.sender.as_deref().unwrap_or("unknown")
-                    };
-                    println!(
-                        "{}  {} — {}: {}",
-                        timestamp(message.timestamp),
-                        chat.title,
-                        sender,
-                        body_for_human(message)
-                    );
-                    print_attachments(message);
-                }
+                let rows = messages
+                    .iter()
+                    .map(|(chat, message)| {
+                        let sender = message.sender.as_deref().unwrap_or("unknown");
+                        let name = if message.mine {
+                            format!("you → {}", chat.title)
+                        } else if chat.id.kind() == "group" {
+                            format!("{} · {sender}", chat.title)
+                        } else {
+                            sender.to_string()
+                        };
+                        message_row(message, name)
+                    })
+                    .collect::<Vec<_>>();
+                print!("{}", render_message_rows(&rows, color_enabled()));
             }
         }
         Command::Download { file } => {
@@ -566,7 +637,8 @@ mod tests {
     };
 
     use super::{
-        message_json, parse_date, parse_time_range, positive_usize, resolve_attachment, ParsedDate,
+        message_json, parse_date, parse_time_range, positive_usize, render_message_rows,
+        resolve_attachment, HumanMessageRow, ParsedDate,
     };
 
     fn now() -> chrono::DateTime<Local> {
@@ -684,5 +756,53 @@ mod tests {
             resolve_attachment(only_repeat, "REPORT").unwrap().timestamp,
             30
         );
+    }
+
+    #[test]
+    fn human_messages_render_in_aligned_columns() {
+        let rows = vec![
+            HumanMessageRow {
+                datetime: "08 Aug 15:21".into(),
+                name: "you".into(),
+                content: vec!["Hallo".into()],
+                incoming: false,
+            },
+            HumanMessageRow {
+                datetime: "08 Aug 15:22".into(),
+                name: "Emilian".into(),
+                content: vec!["Wie geht es dir?".into(), "zweite Zeile".into()],
+                incoming: true,
+            },
+        ];
+        assert_eq!(
+            render_message_rows(&rows, false),
+            concat!(
+                "08 Aug 15:21  you      Hallo\n",
+                "08 Aug 15:22  Emilian  Wie geht es dir?\n",
+                "                       zweite Zeile\n"
+            )
+        );
+    }
+
+    #[test]
+    fn color_is_applied_only_to_incoming_name_and_content() {
+        let rows = vec![
+            HumanMessageRow {
+                datetime: "08 Aug 15:21".into(),
+                name: "you".into(),
+                content: vec!["mine".into()],
+                incoming: false,
+            },
+            HumanMessageRow {
+                datetime: "08 Aug 15:22".into(),
+                name: "Emilian".into(),
+                content: vec!["theirs".into()],
+                incoming: true,
+            },
+        ];
+        let rendered = render_message_rows(&rows, true);
+        assert!(rendered.contains("you      mine"));
+        assert!(rendered.contains("\x1b[38;2;70;130;255mEmilian\x1b[0m"));
+        assert!(rendered.contains("\x1b[38;2;70;130;255mtheirs\x1b[0m"));
     }
 }

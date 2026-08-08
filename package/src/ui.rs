@@ -95,7 +95,8 @@ impl TerminalSession {
         let picker = Picker::from_query_stdio()
             .ok()
             .filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks);
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        terminal.clear()?;
         let (redraw_tx, redraw_rx) = tokio::sync::mpsc::unbounded_channel();
         Ok(Self {
             terminal,
