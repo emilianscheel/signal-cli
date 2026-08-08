@@ -1,9 +1,10 @@
 mod app;
 mod backend;
+mod cli;
 mod preferences;
 mod ui;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, process::ExitCode};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -81,6 +82,13 @@ struct Args {
     /// Enable diagnostic logs (also accepts RUST_LOG).
     #[arg(long)]
     verbose: bool,
+
+    /// Emit machine-readable JSON for one-shot commands.
+    #[arg(long, global = true)]
+    json: bool,
+
+    #[command(subcommand)]
+    command: Option<cli::Command>,
 }
 
 fn data_path(override_path: Option<PathBuf>) -> Result<PathBuf> {
@@ -109,11 +117,11 @@ fn init_logging(verbose: bool) {
         .init();
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
-    let args = Args::parse();
+async fn run(args: Args) -> Result<()> {
     init_logging(args.verbose);
 
+    let command_mode = args.command.is_some();
+    let json_output = args.json;
     let custom_data_path = args.data.is_some();
     let path = data_path(args.data)?;
     let ui_preferences_path = preference_path(&path);
@@ -135,15 +143,20 @@ async fn main() -> Result<()> {
     let app_preferences_path = ui_preferences_path.clone();
     let disconnected = local
         .run_until(async move {
-            let manager: Manager<SqliteStore, Registered> =
+            let mut manager: Manager<SqliteStore, Registered> =
                 match Manager::load_registered(store.clone()).await {
                     Ok(manager) => manager,
-                    Err(_) => link_device(store, args.device_name).await?,
+                    Err(_) => link_device(store, args.device_name, command_mode).await?,
                 };
 
-            App::new(manager, PreferencesStore::new(app_preferences_path))
-                .run()
-                .await
+            if let Some(command) = args.command {
+                cli::run(&mut manager, command, json_output).await?;
+                Ok(false)
+            } else {
+                App::new(manager, PreferencesStore::new(app_preferences_path))
+                    .run()
+                    .await
+            }
         })
         .await?;
 
@@ -153,9 +166,30 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+#[tokio::main(flavor = "multi_thread")]
+async fn main() -> ExitCode {
+    let args = Args::parse();
+    let json_output = args.json;
+    match run(args).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            if json_output {
+                eprintln!("{}", serde_json::json!({ "error": format!("{error:#}") }));
+            } else {
+                eprintln!("error: {error:#}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{data_path, preference_path, protect_local_data, remove_local_data};
+    use clap::Parser;
+
+    use super::{
+        cli::Command, data_path, preference_path, protect_local_data, remove_local_data, Args,
+    };
     use std::path::PathBuf;
 
     #[test]
@@ -211,5 +245,37 @@ mod tests {
         assert!(!directory.path().join("signal.db-shm").exists());
         assert!(!preferences.exists());
         assert!(!temporary_preferences.exists());
+    }
+
+    #[test]
+    fn parses_commands_and_global_json_in_either_position() {
+        let before = Args::try_parse_from(["signal", "--json", "brief", "10"]).unwrap();
+        assert!(before.json);
+        assert!(matches!(before.command, Some(Command::Brief { limit: 10 })));
+
+        let after =
+            Args::try_parse_from(["signal", "read", "emilian", "--limit", "20", "--json"]).unwrap();
+        assert!(after.json);
+        assert!(matches!(
+            after.command,
+            Some(Command::Read { limit: 20, .. })
+        ));
+
+        let send = Args::try_parse_from(["signal", "send", "emilian", "  exact text  "]).unwrap();
+        assert!(matches!(
+            send.command,
+            Some(Command::Send { message, .. }) if message == "  exact text  "
+        ));
+    }
+
+    #[test]
+    fn bare_signal_still_selects_the_tui() {
+        assert!(Args::try_parse_from(["signal"]).unwrap().command.is_none());
+    }
+
+    #[test]
+    fn clap_rejects_zero_limits() {
+        assert!(Args::try_parse_from(["signal", "brief", "0"]).is_err());
+        assert!(Args::try_parse_from(["signal", "read", "chat", "--limit", "0"]).is_err());
     }
 }

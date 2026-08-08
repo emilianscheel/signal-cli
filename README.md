@@ -15,6 +15,8 @@ Code.
 - Live incoming direct and group messages
 - Direct and group text messages
 - Local message history (up to the latest 250 messages per chat)
+- Scriptable chat listing, reading, sending, and cross-chat briefs
+- Human-readable date filters and JSON output for automation
 - Unicode editing and keyboard-only navigation
 - Responsive 32-column chat sidebar in terminals 120 columns or wider
 - Last-opened chat restoration across launches
@@ -45,6 +47,71 @@ For development:
 ```sh
 cargo run --release
 ```
+
+## One-shot commands
+
+Running `signal` without a command opens the interactive interface. The same
+linked-device database can also be used from scripts or directly from your
+shell:
+
+```sh
+signal list
+signal read emilian
+signal read emilian --since yesterday --until now --limit 30
+signal send emilian "See you soon"
+signal brief
+signal brief 10
+```
+
+`list` prints all synced contacts and groups, including chats without local
+messages. Each entry has a stable ID such as `contact:<Signal service ID>` or
+`group:<64 hex characters>`. A `read` or `send` target can be that exact ID or
+a case-insensitive part of a contact or group name. If a name matches more than
+one chat, no action is taken and the matching IDs are printed so you can choose
+one explicitly.
+
+`read` returns the latest 15 matching messages in chronological order by
+default. Use `--limit N` to change that maximum. `brief` returns the latest 15
+messages across all chats, newest first, or the positional count supplied as
+`signal brief N`.
+
+Date bounds use `--since` and `--until`. `since` is inclusive; a date-only
+`until` includes that entire local calendar day, while a date and time is an
+exclusive bound. Multi-word values need shell quotes. Supported forms include:
+
+```sh
+signal read emilian --since "2 hours ago"
+signal read emilian --since 2026-08-01 --until 2026-08-08
+signal read emilian --since "2026-08-08 09:30" --until now
+signal read emilian --since 2026-08-08T09:30:00+02:00
+signal read emilian --since @1786174200
+signal read emilian --since @1786174200000ms
+```
+
+The keywords `now`, `today`, and `yesterday` are supported, as are relative
+seconds, minutes, hours, days, and weeks. Local times that are ambiguous or do
+not exist because of a daylight-saving transition must be supplied as RFC 3339
+with an explicit offset.
+
+Add `--json` before or after a command for stable machine-readable output:
+
+```sh
+signal --json list
+signal brief 10 --json
+```
+
+Command results are written to stdout. Provisioning, freshness warnings, and
+errors go to stderr, so stdout remains parseable JSON. Before a one-shot
+command, Signal CLI waits up to ten seconds for pending linked-device updates.
+If synchronization times out or the network is unavailable, it warns and uses
+the local cache; an attempted `send` still succeeds or fails based on Signal's
+send operation.
+
+Only history already delivered to this linked device is available. Signal does
+not offer linked clients a way to fetch arbitrary older server history.
+Text-containing messages are printed as text; common non-text messages such as
+attachments, stickers, reactions, edits, polls, calls, and stories are shown
+with concise placeholders.
 
 ## First run
 
