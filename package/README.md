@@ -155,16 +155,16 @@ bytes.
 
 ## Keys
 
-| Screen | Key | Action |
-| --- | --- | --- |
-| Chats | `↑`/`↓` or `j`/`k` | Select a conversation |
-| Chats | `Enter` | Open the selected conversation |
-| Chats | `r` | Reload synced contacts and groups |
-| Chats | `d`, then `y` | Erase local account data and disconnect |
-| Chat | `Enter` | Send the current message |
-| Chat | `PageUp`/`PageDown` | Scroll message history |
-| Chat | `Esc` | Return to the chat list |
-| Anywhere | `Ctrl-C` | Quit safely |
+| Screen   | Key                 | Action                                  |
+| -------- | ------------------- | --------------------------------------- |
+| Chats    | `↑`/`↓` or `j`/`k`  | Select a conversation                   |
+| Chats    | `Enter`             | Open the selected conversation          |
+| Chats    | `r`                 | Reload synced contacts and groups       |
+| Chats    | `d`, then `y`       | Erase local account data and disconnect |
+| Chat     | `Enter`             | Send the current message                |
+| Chat     | `PageUp`/`PageDown` | Scroll message history                  |
+| Chat     | `Esc`               | Return to the chat list                 |
+| Anywhere | `Ctrl-C`            | Quit safely                             |
 
 At widths of 120 columns or more, chats remain visible in a fixed 32-column
 sidebar. Press `Esc` to focus the sidebar, move with the arrow keys, and press
@@ -204,3 +204,9 @@ cargo clippy --manifest-path package/Cargo.toml --locked --all-targets -- -D war
 
 The project is AGPL-3.0-only because its Signal client dependency, Presage, is
 AGPL-3.0-only.
+
+## Releasees
+
+```sh
+git tag -a v0.2.0 -m "Release v0.2.0" && git push origin main v0.2.0
+```
