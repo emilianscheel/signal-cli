@@ -11,14 +11,21 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, Padding, Paragraph, Wrap},
     Terminal,
 };
 
 use crate::app::{App, Screen};
 
 const ACCENT: Color = Color::Rgb(70, 130, 255);
-const MUTED: Color = Color::DarkGray;
+
+fn primary() -> Style {
+    Style::default().fg(Color::Reset)
+}
+
+fn muted() -> Style {
+    primary().add_modifier(Modifier::DIM)
+}
 
 pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -65,12 +72,7 @@ fn shell(frame: &mut ratatui::Frame<'_>) -> (Rect, Rect, Rect) {
 fn logo<'a>() -> Line<'a> {
     Line::from(vec![
         Span::styled("● ", Style::default().fg(ACCENT)),
-        Span::styled(
-            "signal",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::styled("signal", primary().add_modifier(Modifier::BOLD)),
     ])
 }
 
@@ -78,10 +80,10 @@ fn status_spans(status: &str) -> Vec<Span<'_>> {
     if status == "Connected" {
         vec![
             Span::styled("● ", Style::default().fg(Color::Green)),
-            Span::styled(status, Style::default().fg(MUTED)),
+            Span::styled(status, muted()),
         ]
     } else {
-        vec![Span::styled(status, Style::default().fg(MUTED))]
+        vec![Span::styled(status, muted())]
     }
 }
 
@@ -97,42 +99,57 @@ fn draw_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
             Line::from("No conversations synced yet"),
             Line::styled(
                 "Keep this open while Signal syncs from your iPhone.",
-                Style::default().fg(MUTED),
+                muted(),
             ),
         ]))]
     } else {
         app.conversations
             .iter()
-            .map(|chat| {
+            .enumerate()
+            .map(|(index, chat)| {
+                let selected = index == app.selected;
                 ListItem::new(Text::from(vec![
-                    Line::styled(
-                        chat.title.clone(),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Line::styled(chat.subtitle.clone(), Style::default().fg(MUTED)),
+                    Line::from(vec![
+                        Span::styled(
+                            if selected { "› " } else { "  " },
+                            if selected {
+                                Style::default().fg(ACCENT)
+                            } else {
+                                primary()
+                            },
+                        ),
+                        Span::styled(
+                            chat.title.clone(),
+                            if selected {
+                                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                            } else {
+                                primary().add_modifier(Modifier::BOLD)
+                            },
+                        ),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(chat.subtitle.clone(), muted()),
+                    ]),
+                    Line::raw(""),
                 ]))
             })
             .collect()
     };
-    let list = List::new(content)
-        .block(
-            Block::default()
-                .title(" Chats ")
-                .borders(Borders::TOP)
-                .padding(Padding::horizontal(2)),
-        )
-        .highlight_symbol("› ")
-        .highlight_style(Style::default().fg(ACCENT).add_modifier(Modifier::BOLD));
-    let mut state =
-        ListState::default().with_selected((!app.conversations.is_empty()).then_some(app.selected));
-    frame.render_stateful_widget(list, body, &mut state);
+    let list = List::new(content).block(
+        Block::default()
+            .title(" Chats ")
+            .borders(Borders::TOP)
+            .padding(Padding::horizontal(2)),
+    );
+    frame.render_widget(list, body);
     let mut footer_spans = vec![
-        Span::styled("↑↓", Style::default().fg(Color::White)),
-        Span::styled(" move   ", Style::default().fg(MUTED)),
-        Span::styled("enter", Style::default().fg(Color::White)),
-        Span::styled(" open   ", Style::default().fg(MUTED)),
-        Span::styled("r", Style::default().fg(Color::White)),
-        Span::styled(" refresh   ", Style::default().fg(MUTED)),
+        Span::styled("↑↓", primary()),
+        Span::styled(" move   ", muted()),
+        Span::styled("enter", primary()),
+        Span::styled(" open   ", muted()),
+        Span::styled("r", primary()),
+        Span::styled(" refresh   ", muted()),
     ];
     footer_spans.extend(status_spans(&app.status));
     frame.render_widget(
@@ -158,7 +175,7 @@ fn draw_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
             logo().spans[0].clone(),
             logo().spans[1].clone(),
             Span::raw("  "),
-            Span::styled(title, Style::default().fg(MUTED)),
+            Span::styled(title, muted()),
         ]))
         .block(Block::default().padding(Padding::horizontal(1))),
         header,
@@ -184,7 +201,7 @@ fn draw_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
                     .fg(if message.mine { ACCENT } else { Color::Green })
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {time}"), Style::default().fg(MUTED)),
+            Span::styled(format!("  {time}"), muted()),
         ]));
         for wrapped in wrap_text(&message.body, width) {
             lines.push(Line::raw(wrapped));
@@ -192,10 +209,7 @@ fn draw_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
         lines.push(Line::raw(""));
     }
     if lines.is_empty() {
-        lines.push(Line::styled(
-            "No messages yet. Say hello.",
-            Style::default().fg(MUTED),
-        ));
+        lines.push(Line::styled("No messages yet. Say hello.", muted()));
     }
     let total_lines = lines.len() as u16;
     let available = messages.height.saturating_sub(2);
@@ -230,14 +244,14 @@ fn draw_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
     frame.set_cursor_position((cursor_x.min(input.right().saturating_sub(2)), input.y + 1));
 
     let mut footer_spans = vec![
-        Span::styled("enter", Style::default().fg(Color::White)),
-        Span::styled(" send   ", Style::default().fg(MUTED)),
-        Span::styled("esc", Style::default().fg(Color::White)),
-        Span::styled(" chats   ", Style::default().fg(MUTED)),
-        Span::styled("pgup/dn", Style::default().fg(Color::White)),
-        Span::styled(" scroll   ", Style::default().fg(MUTED)),
-        Span::styled("ctrl-c", Style::default().fg(Color::White)),
-        Span::styled(" quit   ", Style::default().fg(MUTED)),
+        Span::styled("enter", primary()),
+        Span::styled(" send   ", muted()),
+        Span::styled("esc", primary()),
+        Span::styled(" chats   ", muted()),
+        Span::styled("pgup/dn", primary()),
+        Span::styled(" scroll   ", muted()),
+        Span::styled("ctrl-c", primary()),
+        Span::styled(" quit   ", muted()),
     ];
     footer_spans.extend(status_spans(&app.status));
     frame.render_widget(
@@ -270,7 +284,8 @@ fn wrap_text(input: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::wrap_text;
+    use super::{muted, primary, wrap_text};
+    use ratatui::style::{Color, Modifier};
 
     #[test]
     fn wraps_at_word_boundaries() {
@@ -280,5 +295,12 @@ mod tests {
     #[test]
     fn preserves_explicit_newlines() {
         assert_eq!(wrap_text("one\ntwo", 20), vec!["one", "two"]);
+    }
+
+    #[test]
+    fn neutral_styles_follow_the_terminal_theme() {
+        assert_eq!(primary().fg, Some(Color::Reset));
+        assert_eq!(muted().fg, Some(Color::Reset));
+        assert!(muted().add_modifier.contains(Modifier::DIM));
     }
 }
