@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "A fast, keyboard-first Signal client for the terminal"
-repository = "https://github.com/coderdojo/signal-cli"
+repository = "https://github.com/emilianscheel/signal-cli"
 
 [[bin]]
 name = "signal"
