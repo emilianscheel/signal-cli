@@ -1,4 +1,9 @@
-use std::io::{self, Stdout};
+use std::{
+    collections::HashMap,
+    io::{self, Stdout},
+    sync::mpsc::{self, Receiver},
+    thread,
+};
 
 use anyhow::Result;
 use chrono::{Local, TimeZone};
@@ -14,8 +19,18 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Padding, Paragraph, Wrap},
     Terminal,
 };
+use ratatui_image::{
+    errors::Errors as ImageError,
+    picker::{Picker, ProtocolType},
+    thread::{ResizeRequest, ResizeResponse, ThreadImage, ThreadProtocol},
+    Resize,
+};
 
-use crate::app::{App, LayoutMode, Screen};
+use crate::{
+    app::{App, LayoutMode, Screen},
+    attachments::AttachmentState,
+    backend::{ChatAttachment, MessageKind},
+};
 
 const ACCENT: Color = Color::Rgb(70, 130, 255);
 pub const SIDEBAR_WIDTH: u16 = 32;
@@ -30,6 +45,46 @@ fn muted() -> Style {
 
 pub struct TerminalSession {
     terminal: Terminal<CrosstermBackend<Stdout>>,
+    picker: Option<Picker>,
+    images: HashMap<String, AsyncImage>,
+    redraw_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    redraw_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+}
+
+struct AsyncImage {
+    protocol: ThreadProtocol,
+    completed: Receiver<Result<ResizeResponse, ImageError>>,
+}
+
+impl AsyncImage {
+    fn new(
+        picker: Picker,
+        image: image::DynamicImage,
+        redraw: tokio::sync::mpsc::UnboundedSender<()>,
+    ) -> Self {
+        let (work_tx, work_rx) = mpsc::channel::<ResizeRequest>();
+        let (completed_tx, completed) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(request) = work_rx.recv() {
+                if completed_tx.send(request.resize_encode()).is_err() {
+                    break;
+                }
+                let _ = redraw.send(());
+            }
+        });
+        Self {
+            protocol: ThreadProtocol::new(work_tx, Some(picker.new_resize_protocol(image))),
+            completed,
+        }
+    }
+
+    fn apply_completed(&mut self) {
+        while let Ok(result) = self.completed.try_recv() {
+            if let Ok(response) = result {
+                self.protocol.update_resized_protocol(response);
+            }
+        }
+    }
 }
 
 impl TerminalSession {
@@ -37,13 +92,48 @@ impl TerminalSession {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen)?;
+        let picker = Picker::from_query_stdio()
+            .ok()
+            .filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks);
         let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
-        Ok(Self { terminal })
+        let (redraw_tx, redraw_rx) = tokio::sync::mpsc::unbounded_channel();
+        Ok(Self {
+            terminal,
+            picker,
+            images: HashMap::new(),
+            redraw_tx,
+            redraw_rx,
+        })
     }
 
-    pub fn draw(&mut self, app: &App) -> Result<()> {
-        self.terminal.draw(|frame| draw_app(frame, app))?;
-        Ok(())
+    pub fn supports_images(&self) -> bool {
+        self.picker.is_some()
+    }
+
+    pub fn clear_images(&mut self) {
+        self.images.clear();
+    }
+
+    pub async fn redraw_requested(&mut self) {
+        let _ = self.redraw_rx.recv().await;
+    }
+
+    pub fn draw(&mut self, app: &mut App) -> Result<Vec<String>> {
+        self.images.retain(|key, _| {
+            app.messages.iter().any(|message| {
+                message
+                    .attachments
+                    .iter()
+                    .any(|attachment| &attachment.key == key)
+            })
+        });
+        let picker = self.picker;
+        let images = &mut self.images;
+        let redraw = self.redraw_tx.clone();
+        let mut visible_images = Vec::new();
+        self.terminal
+            .draw(|frame| draw_app(frame, app, picker, images, &redraw, &mut visible_images))?;
+        Ok(visible_images)
     }
 }
 
@@ -55,7 +145,14 @@ impl Drop for TerminalSession {
     }
 }
 
-fn draw_app(frame: &mut ratatui::Frame<'_>, app: &App) {
+fn draw_app(
+    frame: &mut ratatui::Frame<'_>,
+    app: &App,
+    picker: Option<Picker>,
+    images: &mut HashMap<String, AsyncImage>,
+    redraw: &tokio::sync::mpsc::UnboundedSender<()>,
+    visible_images: &mut Vec<String>,
+) {
     if app.screen == Screen::DisconnectConfirm {
         draw_disconnect_confirm(frame);
         return;
@@ -63,10 +160,10 @@ fn draw_app(frame: &mut ratatui::Frame<'_>, app: &App) {
     match app.layout_mode() {
         LayoutMode::Narrow => match app.screen {
             Screen::Conversations => draw_narrow_conversations(frame, app),
-            Screen::Chat => draw_narrow_chat(frame, app),
+            Screen::Chat => draw_narrow_chat(frame, app, picker, images, redraw, visible_images),
             Screen::DisconnectConfirm => unreachable!(),
         },
-        LayoutMode::Wide => draw_wide(frame, app),
+        LayoutMode::Wide => draw_wide(frame, app, picker, images, redraw, visible_images),
     }
 }
 
@@ -198,7 +295,183 @@ fn conversation_list(app: &App, wide: bool, focused: bool) -> List<'static> {
     )
 }
 
-fn render_messages(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+enum MessageElement {
+    Text(Line<'static>),
+    Image {
+        key: String,
+        name: String,
+        height: u16,
+    },
+}
+
+impl MessageElement {
+    const fn height(&self) -> u16 {
+        match self {
+            Self::Text(_) => 1,
+            Self::Image { height, .. } => *height,
+        }
+    }
+}
+
+fn human_size(size: Option<u32>) -> String {
+    let Some(size) = size else {
+        return "unknown size".into();
+    };
+    let size = f64::from(size);
+    const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
+    let mut value = size;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", value as u64, UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
+}
+
+fn friendly_type(content_type: Option<&str>) -> String {
+    let value = content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+        .unwrap_or("unknown type");
+    match value {
+        "application/pdf" => "PDF".into(),
+        "image/jpeg" | "image/jpg" => "JPEG".into(),
+        "image/png" => "PNG".into(),
+        "image/webp" => "WebP".into(),
+        "image/gif" => "GIF".into(),
+        "video/mp4" => "MP4 video".into(),
+        "video/quicktime" => "QuickTime video".into(),
+        "unknown type" => value.into(),
+        _ => value.to_string(),
+    }
+}
+
+fn attachment_note(attachment: &ChatAttachment) -> Line<'static> {
+    Line::styled(
+        format!(
+            "📎 {} · {} · {}",
+            attachment.display_name(),
+            friendly_type(attachment.content_type.as_deref()),
+            human_size(attachment.size)
+        ),
+        muted(),
+    )
+}
+
+fn image_failure(error: &str) -> &str {
+    if error.contains("50 MiB") {
+        "image is larger than 50 MiB"
+    } else if error.contains("40 megapixel") {
+        "image is larger than 40 megapixels"
+    } else if error.contains("decode image") || error.contains("detect image format") {
+        "unsupported or malformed image"
+    } else {
+        "could not load preview"
+    }
+}
+
+fn image_height(attachment: &ChatAttachment, width: u16, picker: Picker) -> u16 {
+    let max_width = (width.saturating_mul(2) / 5).max(1);
+    let max_height = 12;
+    let (Some(pixel_width), Some(pixel_height)) = (attachment.width, attachment.height) else {
+        return max_height.min(8);
+    };
+    if pixel_width == 0 || pixel_height == 0 {
+        return max_height.min(8);
+    }
+    let (cell_width, cell_height) = picker.font_size();
+    let numerator = u64::from(max_width) * u64::from(pixel_height) * u64::from(cell_width);
+    let denominator = u64::from(pixel_width) * u64::from(cell_height).max(1);
+    u16::try_from(numerator.div_ceil(denominator))
+        .unwrap_or(max_height)
+        .clamp(1, max_height)
+}
+
+fn message_elements(
+    app: &App,
+    title: &str,
+    width: u16,
+    picker: Option<Picker>,
+) -> Vec<MessageElement> {
+    let mut elements = Vec::new();
+    let wrap_width = usize::from(width.max(1));
+    for message in &app.messages {
+        let time = Local
+            .timestamp_millis_opt(message.timestamp as i64)
+            .single()
+            .map(|date| date.format("%H:%M").to_string())
+            .unwrap_or_default();
+        let author = if message.mine {
+            "you".to_string()
+        } else {
+            message.sender.clone().unwrap_or_else(|| title.to_string())
+        };
+        elements.push(MessageElement::Text(Line::from(vec![
+            Span::styled(
+                author,
+                Style::default()
+                    .fg(if message.mine { ACCENT } else { Color::Green })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {time}"), muted()),
+        ])));
+        let generic_attachment_body =
+            message.kind == MessageKind::Attachment && message.body.starts_with("[attachment");
+        if !message.body.is_empty() && !generic_attachment_body {
+            elements.extend(
+                wrap_text(&message.body, wrap_width)
+                    .into_iter()
+                    .map(|line| MessageElement::Text(Line::raw(line))),
+            );
+        }
+
+        let mut inline_images = 0;
+        for attachment in &message.attachments {
+            let inline = picker.is_some() && attachment.can_preview() && inline_images < 3;
+            if inline {
+                inline_images += 1;
+                match app.attachment_state(&attachment.key) {
+                    AttachmentState::Failed(error) => {
+                        elements.push(MessageElement::Text(Line::styled(
+                            format!(
+                                "Image unavailable: {} · {}",
+                                attachment.display_name(),
+                                image_failure(&error)
+                            ),
+                            muted(),
+                        )))
+                    }
+                    AttachmentState::NotRequested
+                    | AttachmentState::Loading
+                    | AttachmentState::Ready(_) => elements.push(MessageElement::Image {
+                        key: attachment.key.clone(),
+                        name: attachment.display_name().to_string(),
+                        height: image_height(attachment, width, picker.expect("picker exists")),
+                    }),
+                }
+                elements.push(MessageElement::Text(attachment_note(attachment)));
+            } else {
+                elements.push(MessageElement::Text(attachment_note(attachment)));
+            }
+        }
+        elements.push(MessageElement::Text(Line::raw("")));
+    }
+    elements
+}
+
+fn render_messages(
+    frame: &mut ratatui::Frame<'_>,
+    app: &App,
+    area: Rect,
+    picker: Option<Picker>,
+    images: &mut HashMap<String, AsyncImage>,
+    redraw: &tokio::sync::mpsc::UnboundedSender<()>,
+    visible_images: &mut Vec<String>,
+) {
     if app.opened_conversation().is_none() {
         frame.render_widget(
             Paragraph::new(Line::styled(
@@ -220,51 +493,91 @@ fn render_messages(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
         .opened_conversation()
         .map(|conversation| conversation.title.as_str())
         .unwrap_or("Signal");
-    let width = area.width.saturating_sub(6).max(20) as usize;
-    let mut lines = Vec::new();
-    for message in &app.messages {
-        let time = Local
-            .timestamp_millis_opt(message.timestamp as i64)
-            .single()
-            .map(|date| date.format("%H:%M").to_string())
-            .unwrap_or_default();
-        let author = if message.mine {
-            "you".to_string()
-        } else {
-            message.sender.clone().unwrap_or_else(|| title.to_string())
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                author,
-                Style::default()
-                    .fg(if message.mine { ACCENT } else { Color::Green })
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {time}"), muted()),
-        ]));
-        for wrapped in wrap_text(&message.body, width) {
-            lines.push(Line::raw(wrapped));
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .padding(Padding::horizontal(2));
+    let content = block.inner(area);
+    frame.render_widget(block, area);
+    if app.messages.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::styled("No messages yet. Say hello.", muted())),
+            content,
+        );
+        return;
+    }
+
+    let elements = message_elements(app, title, content.width, picker);
+    let total_height = elements.iter().fold(0_u16, |height, element| {
+        height.saturating_add(element.height())
+    });
+    let bottom = total_height.saturating_sub(content.height);
+    let start = bottom.saturating_sub(app.scroll.min(bottom));
+    let prefetch_start = start.saturating_sub(content.height);
+    let prefetch_end = start.saturating_add(content.height.saturating_mul(2));
+    let mut virtual_y = 0_u16;
+    for element in elements {
+        let height = element.height();
+        let end = virtual_y.saturating_add(height);
+        if let MessageElement::Image { key, .. } = &element {
+            if end > prefetch_start && virtual_y < prefetch_end {
+                visible_images.push(key.clone());
+            }
         }
-        lines.push(Line::raw(""));
+        if end > start && virtual_y < start.saturating_add(content.height) {
+            let clipped_top = start.saturating_sub(virtual_y);
+            let clipped_bottom = end.saturating_sub(start.saturating_add(content.height));
+            let visible_height = height
+                .saturating_sub(clipped_top)
+                .saturating_sub(clipped_bottom);
+            let y = content.y.saturating_add(virtual_y.saturating_sub(start));
+            let row = Rect::new(content.x, y, content.width, visible_height);
+            match element {
+                MessageElement::Text(line) => frame.render_widget(Paragraph::new(line), row),
+                MessageElement::Image { key, name, height } => {
+                    if clipped_top > 0 || clipped_bottom > 0 {
+                        frame.render_widget(
+                            Paragraph::new(Line::styled("[image continues…]", muted())),
+                            row,
+                        );
+                    } else {
+                        match app.attachment_state(&key) {
+                            AttachmentState::Ready(image) => {
+                                let state = images.entry(key).or_insert_with(|| {
+                                    AsyncImage::new(
+                                        picker.expect("picker exists"),
+                                        (*image).clone(),
+                                        redraw.clone(),
+                                    )
+                                });
+                                state.apply_completed();
+                                frame.render_stateful_widget(
+                                    ThreadImage::default().resize(Resize::Fit(None)),
+                                    Rect::new(
+                                        row.x,
+                                        row.y,
+                                        row.width.saturating_mul(2) / 5,
+                                        height,
+                                    ),
+                                    &mut state.protocol,
+                                );
+                            }
+                            AttachmentState::NotRequested | AttachmentState::Loading => {
+                                frame.render_widget(
+                                    Paragraph::new(Line::styled(
+                                        format!("Loading {name}…"),
+                                        muted(),
+                                    )),
+                                    row,
+                                );
+                            }
+                            AttachmentState::Failed(_) => {}
+                        }
+                    }
+                }
+            }
+        }
+        virtual_y = end;
     }
-    if lines.is_empty() {
-        lines.push(Line::styled("No messages yet. Say hello.", muted()));
-    }
-    let total_lines = lines.len() as u16;
-    let available = area.height.saturating_sub(2);
-    let bottom = total_lines.saturating_sub(available);
-    let scroll = bottom.saturating_sub(app.scroll.min(bottom));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .padding(Padding::horizontal(2)),
-            ),
-        area,
-    );
 }
 
 fn render_composer(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect, focused: bool) {
@@ -338,7 +651,14 @@ fn draw_narrow_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
     render_footer(frame, conversation_footer(app), footer);
 }
 
-fn draw_narrow_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
+fn draw_narrow_chat(
+    frame: &mut ratatui::Frame<'_>,
+    app: &App,
+    picker: Option<Picker>,
+    images: &mut HashMap<String, AsyncImage>,
+    redraw: &tokio::sync::mpsc::UnboundedSender<()>,
+    visible_images: &mut Vec<String>,
+) {
     let [header, messages, input, footer] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -349,12 +669,19 @@ fn draw_narrow_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
         ])
         .areas(frame.area());
     render_chat_header(frame, app, header, true);
-    render_messages(frame, app, messages);
+    render_messages(frame, app, messages, picker, images, redraw, visible_images);
     render_composer(frame, app, input, true);
     render_footer(frame, chat_footer(app, false), footer);
 }
 
-fn draw_wide(frame: &mut ratatui::Frame<'_>, app: &App) {
+fn draw_wide(
+    frame: &mut ratatui::Frame<'_>,
+    app: &App,
+    picker: Option<Picker>,
+    images: &mut HashMap<String, AsyncImage>,
+    redraw: &tokio::sync::mpsc::UnboundedSender<()>,
+    visible_images: &mut Vec<String>,
+) {
     let (header, body, footer) = shell(frame.area());
     let (sidebar_header, chat_header) = wide_columns(header);
     let (sidebar, chat) = wide_columns(body);
@@ -369,7 +696,7 @@ fn draw_wide(frame: &mut ratatui::Frame<'_>, app: &App) {
         conversation_list(app, true, app.screen == Screen::Conversations),
         sidebar,
     );
-    render_messages(frame, app, messages);
+    render_messages(frame, app, messages, picker, images, redraw, visible_images);
     render_composer(frame, app, input, app.screen == Screen::Chat);
     let footer_line = if app.screen == Screen::Conversations {
         conversation_footer(app)
@@ -443,7 +770,12 @@ fn wrap_text(input: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{muted, primary, shell, status_spans, wide_columns, wrap_text, SIDEBAR_WIDTH};
+    use super::{
+        friendly_type, human_size, image_failure, image_height, muted, primary, shell,
+        status_spans, wide_columns, wrap_text, SIDEBAR_WIDTH,
+    };
+    use crate::backend::ChatAttachment;
+    use presage::libsignal_service::proto::AttachmentPointer;
     use ratatui::{
         layout::Rect,
         style::{Color, Modifier},
@@ -483,5 +815,40 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert_eq!(rendered, "● Connected");
+    }
+
+    #[test]
+    fn attachment_metadata_is_human_readable() {
+        assert_eq!(human_size(Some(2_516_582)), "2.4 MiB");
+        assert_eq!(human_size(None), "unknown size");
+        assert_eq!(friendly_type(Some("application/pdf")), "PDF");
+        assert_eq!(friendly_type(Some("video/mp4")), "MP4 video");
+        assert_eq!(
+            image_failure("decode image: bad data"),
+            "unsupported or malformed image"
+        );
+    }
+
+    #[test]
+    fn inline_images_fit_the_balanced_height_limit() {
+        let pointer = AttachmentPointer {
+            digest: Some(vec![1; 32]),
+            content_type: Some("image/png".into()),
+            width: Some(800),
+            height: Some(400),
+            ..Default::default()
+        };
+        let attachment = ChatAttachment {
+            key: "image".into(),
+            file_name: Some("image.png".into()),
+            content_type: pointer.content_type.clone(),
+            size: Some(1_024),
+            width: pointer.width,
+            height: pointer.height,
+            pointer,
+        };
+        let picker = ratatui_image::picker::Picker::from_fontsize((10, 20));
+        assert_eq!(image_height(&attachment, 80, picker), 8);
+        assert!(image_height(&attachment, 20, picker) <= 12);
     }
 }

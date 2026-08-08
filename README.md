@@ -15,6 +15,8 @@ Code.
 - Live incoming direct and group messages
 - Direct and group text messages
 - Local message history (up to the latest 250 messages per chat)
+- Compact inline images in terminals with Kitty, iTerm2, or Sixel graphics support
+- Filenames, media types, and sizes for videos, PDFs, and other attachments
 - Scriptable chat listing, reading, sending, and cross-chat briefs
 - Human-readable date filters and JSON output for automation
 - Unicode editing and keyboard-only navigation
@@ -109,9 +111,10 @@ send operation.
 
 Only history already delivered to this linked device is available. Signal does
 not offer linked clients a way to fetch arbitrary older server history.
-Text-containing messages are printed as text; common non-text messages such as
-attachments, stickers, reactions, edits, polls, calls, and stories are shown
-with concise placeholders.
+Text-containing messages are printed as text. JSON output includes structured
+attachment metadata; human-readable one-shot output reports the attachment
+count. Other non-text messages such as stickers, reactions, edits, polls,
+calls, and stories are shown with concise placeholders.
 
 ## First run
 
@@ -122,6 +125,12 @@ with concise placeholders.
 
 The database is stored in the operating system's local data directory. Use
 `signal --data /path/to/signal.db` to choose a different location.
+
+The interactive interface automatically downloads images near the visible
+viewport when the terminal supports a native graphics protocol. Previews are
+limited to three per message, 40% of the chat width, and 12 terminal rows.
+Other terminals show the same attachment metadata without downloading image
+bytes.
 
 ## Keys
 
@@ -149,13 +158,18 @@ content. Keep it on a trusted disk and do not copy or commit it. Removing it
 requires linking the CLI again. You can revoke the client at any time from
 Signal's **Linked Devices** screen.
 
+Downloaded image previews are decrypted and cached beside the database in a
+private `0700` directory with `0600` files. The cache is capped at 250 MiB and
+is removed by the confirmed disconnect action.
+
 The in-app disconnect action erases all local credentials, protocol sessions,
 contacts, groups, and messages after confirmation. Signal does not allow a
 secondary device to revoke itself, so also remove **Signal CLI** from the
 iPhone's **Linked Devices** screen to complete server-side revocation.
 
 This is an independent, unofficial client and is not affiliated with Signal.
-The current release focuses on fast text chat; attachments, reactions, typing
+The current release supports receiving attachment previews and metadata but
+does not yet send, save, open, or play attachments. Reactions, typing
 indicators, safety-number management, and disappearing-message cleanup are not
 yet exposed in the UI.
 

@@ -13,7 +13,7 @@ use presage::{manager::Registered, Manager};
 use presage_store_sqlite::SqliteStore;
 use serde_json::{json, Value};
 
-use crate::backend::{self, ChatMessage, Conversation, MessageKind};
+use crate::backend::{self, ChatMessage, Conversation};
 
 const DEFAULT_LIMIT: usize = 15;
 const SYNC_TIMEOUT: Duration = Duration::from_secs(10);
@@ -214,6 +214,19 @@ fn timestamp(timestamp: u64) -> String {
 }
 
 fn message_json(message: &ChatMessage) -> Value {
+    let attachments = message
+        .attachments
+        .iter()
+        .map(|attachment| {
+            json!({
+                "name": attachment.file_name,
+                "content_type": attachment.content_type,
+                "size": attachment.size,
+                "width": attachment.width,
+                "height": attachment.height,
+            })
+        })
+        .collect::<Vec<_>>();
     json!({
         "timestamp": timestamp(message.timestamp),
         "timestamp_ms": message.timestamp,
@@ -221,7 +234,8 @@ fn message_json(message: &ChatMessage) -> Value {
         "sender": if message.mine { "you" } else { message.sender.as_deref().unwrap_or("unknown") },
         "kind": message.kind,
         "body": message.body,
-        "attachment_count": message.attachment_count,
+        "attachment_count": message.attachments.len(),
+        "attachments": attachments,
     })
 }
 
@@ -235,13 +249,16 @@ fn write_json(value: &Value) -> Result<()> {
 
 fn body_for_human(message: &ChatMessage) -> String {
     let mut body = message.body.replace('\n', "\n    ");
-    if message.attachment_count > 0 && message.kind != MessageKind::Attachment {
-        let noun = if message.attachment_count == 1 {
+    if !message.attachments.is_empty() {
+        let noun = if message.attachments.len() == 1 {
             "attachment"
         } else {
             "attachments"
         };
-        body.push_str(&format!(" [{0} {noun}]", message.attachment_count));
+        if !body.is_empty() {
+            body.push(' ');
+        }
+        body.push_str(&format!("[{0} {noun}]", message.attachments.len()));
     }
     body
 }
@@ -460,7 +477,7 @@ mod tests {
             sender: None,
             body: "hello".into(),
             kind: MessageKind::Text,
-            attachment_count: 0,
+            attachments: Vec::new(),
         });
         assert_eq!(value["timestamp_ms"], 1_786_185_000_123_u64);
         assert_eq!(value["direction"], "sent");

@@ -1,3 +1,9 @@
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+};
+
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyModifiers};
 use futures::StreamExt;
@@ -10,6 +16,7 @@ use presage_store_sqlite::SqliteStore;
 use tokio::sync::mpsc;
 
 use crate::{
+    attachments::{self, AttachmentCache, AttachmentEvent, AttachmentState},
     backend::{self, ChatMessage, Conversation, NetworkEvent},
     preferences::PreferencesStore,
     ui::TerminalSession,
@@ -69,10 +76,17 @@ pub struct App {
     preferences: PreferencesStore,
     receiver: Option<tokio::task::JoinHandle<()>>,
     disconnected: bool,
+    attachment_cache: AttachmentCache,
+    pub attachment_states: HashMap<String, AttachmentState>,
+    attachment_slots: Arc<tokio::sync::Semaphore>,
 }
 
 impl App {
-    pub fn new(manager: Manager<SqliteStore, Registered>, preferences: PreferencesStore) -> Self {
+    pub fn new(
+        manager: Manager<SqliteStore, Registered>,
+        preferences: PreferencesStore,
+        attachment_cache_path: PathBuf,
+    ) -> Self {
         Self {
             manager,
             conversations: Vec::new(),
@@ -89,7 +103,26 @@ impl App {
             preferences,
             receiver: None,
             disconnected: false,
+            attachment_cache: AttachmentCache::new(attachment_cache_path),
+            attachment_states: HashMap::new(),
+            attachment_slots: Arc::new(tokio::sync::Semaphore::new(2)),
         }
+    }
+
+    pub fn attachment_state(&self, key: &str) -> AttachmentState {
+        self.attachment_states
+            .get(key)
+            .cloned()
+            .unwrap_or(AttachmentState::NotRequested)
+    }
+
+    fn retain_current_attachment_states(&mut self) {
+        let keys = self
+            .messages
+            .iter()
+            .flat_map(|message| message.attachments.iter().map(|attachment| &attachment.key))
+            .collect::<HashSet<_>>();
+        self.attachment_states.retain(|key, _| keys.contains(key));
     }
 
     pub fn selected_conversation(&self) -> Option<&Conversation> {
@@ -140,6 +173,7 @@ impl App {
             return Ok(());
         };
         self.messages = backend::history(&self.manager, &conversation).await?;
+        self.retain_current_attachment_states();
         self.opened = Some(conversation.id.clone());
         self.scroll = 0;
         if focus_chat {
@@ -305,6 +339,7 @@ impl App {
                         .cloned()
                         .expect("opened chat exists");
                     self.messages = backend::history(&self.manager, &conversation).await?;
+                    self.retain_current_attachment_states();
                     self.scroll = 0;
                 }
                 self.status = "New message".into();
@@ -320,6 +355,48 @@ impl App {
         Ok(())
     }
 
+    fn queue_visible_images(
+        &mut self,
+        keys: Vec<String>,
+        tx: &mpsc::UnboundedSender<AttachmentEvent>,
+    ) {
+        for key in keys {
+            if !matches!(self.attachment_state(&key), AttachmentState::NotRequested) {
+                continue;
+            }
+            let Some(attachment) = self
+                .messages
+                .iter()
+                .flat_map(|message| &message.attachments)
+                .find(|attachment| attachment.key == key && attachment.can_preview())
+                .cloned()
+            else {
+                continue;
+            };
+            self.attachment_states
+                .insert(key.clone(), AttachmentState::Loading);
+            let manager = self.manager.clone();
+            let cache = self.attachment_cache.clone();
+            let slots = self.attachment_slots.clone();
+            let tx = tx.clone();
+            tokio::task::spawn_local(async move {
+                let Ok(_permit) = slots.acquire_owned().await else {
+                    return;
+                };
+                let event = attachments::load_image(manager, cache, attachment).await;
+                let _ = tx.send(event);
+            });
+        }
+    }
+
+    fn handle_attachment(&mut self, event: AttachmentEvent) {
+        let state = match event.result {
+            Ok(image) => AttachmentState::Ready(image),
+            Err(error) => AttachmentState::Failed(error),
+        };
+        self.attachment_states.insert(event.key, state);
+    }
+
     pub async fn run(mut self) -> Result<bool> {
         self.terminal_width = crossterm::terminal::size()?.0;
         let remembered = self.preferences.load_last_conversation();
@@ -330,18 +407,27 @@ impl App {
         self.receiver = Some(backend::start_receiver(self.manager.clone(), network_tx));
         let mut terminal = TerminalSession::start()?;
         let mut events = EventStream::new();
+        let (attachment_tx, mut attachment_rx) = mpsc::unbounded_channel();
 
         loop {
-            terminal.draw(&self)?;
+            let visible_images = terminal.draw(&mut self)?;
+            if terminal.supports_images() {
+                self.queue_visible_images(visible_images, &attachment_tx);
+            }
             tokio::select! {
                 event = events.next() => match event {
                     Some(Ok(Event::Key(key))) if self.handle_key(key).await? => break,
-                    Some(Ok(Event::Resize(width, _))) => self.handle_resize(width).await?,
+                    Some(Ok(Event::Resize(width, _))) => {
+                        self.handle_resize(width).await?;
+                        terminal.clear_images();
+                    },
                     Some(Err(error)) => return Err(error.into()),
                     None => break,
                     _ => {}
                 },
                 Some(event) = network_rx.recv() => self.handle_network(event).await?,
+                Some(event) = attachment_rx.recv() => self.handle_attachment(event),
+                _ = terminal.redraw_requested(), if terminal.supports_images() => {},
             }
         }
         Ok(self.disconnected)

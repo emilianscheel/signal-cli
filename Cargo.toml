@@ -18,10 +18,12 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 directories = "6.0"
 futures = "0.3"
 hex = "0.4"
+image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
 presage = { git = "https://github.com/whisperfish/presage", rev = "1369a7e43d60df066dfd5b89ee2d1f355ef86c13" }
 presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "1369a7e43d60df066dfd5b89ee2d1f355ef86c13" }
 qrcode = { version = "0.14", default-features = false }
 ratatui = "0.29"
+ratatui-image = { version = "5.0", default-features = false, features = ["crossterm"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "time"] }

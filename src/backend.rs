@@ -9,6 +9,7 @@ use presage::{
     libsignal_service::{
         configuration::SignalServers,
         content::{Content, ContentBody, DataMessage, GroupContextV2},
+        proto::AttachmentPointer,
         protocol::ServiceId,
     },
     manager::Registered,
@@ -74,14 +75,80 @@ pub enum MessageKind {
     NonText,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChatAttachment {
+    pub key: String,
+    pub file_name: Option<String>,
+    pub content_type: Option<String>,
+    pub size: Option<u32>,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+    pub pointer: AttachmentPointer,
+}
+
+impl ChatAttachment {
+    pub fn display_name(&self) -> &str {
+        self.file_name.as_deref().unwrap_or("attachment")
+    }
+
+    pub fn is_supported_image(&self) -> bool {
+        matches!(
+            self.content_type
+                .as_deref()
+                .and_then(|value| value.split(';').next())
+                .map(str::trim),
+            Some("image/png" | "image/jpeg" | "image/jpg" | "image/webp" | "image/gif")
+        )
+    }
+
+    pub fn can_preview(&self) -> bool {
+        const MAX_BYTES: u32 = 50 * 1024 * 1024;
+        const MAX_PIXELS: u64 = 40_000_000;
+        self.is_supported_image()
+            && self.pointer.digest.is_some()
+            && self.size.is_none_or(|size| size <= MAX_BYTES)
+            && match (self.width, self.height) {
+                (Some(width), Some(height)) => u64::from(width) * u64::from(height) <= MAX_PIXELS,
+                _ => true,
+            }
+    }
+}
+
+fn chat_attachments(timestamp: u64, pointers: &[AttachmentPointer]) -> Vec<ChatAttachment> {
+    pointers
+        .iter()
+        .enumerate()
+        .map(|(index, pointer)| ChatAttachment {
+            key: pointer
+                .digest
+                .as_deref()
+                .map(hex::encode)
+                .or_else(|| pointer.client_uuid.as_deref().map(hex::encode))
+                .unwrap_or_else(|| format!("missing-{timestamp}-{index}")),
+            file_name: pointer
+                .file_name
+                .clone()
+                .filter(|name| !name.trim().is_empty()),
+            content_type: pointer
+                .content_type
+                .clone()
+                .filter(|value| !value.trim().is_empty()),
+            size: pointer.size,
+            width: pointer.width,
+            height: pointer.height,
+            pointer: pointer.clone(),
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ChatMessage {
     pub timestamp: u64,
     pub mine: bool,
     pub sender: Option<String>,
     pub body: String,
     pub kind: MessageKind,
-    pub attachment_count: usize,
+    pub attachments: Vec<ChatAttachment>,
 }
 
 #[derive(Debug)]
@@ -288,7 +355,10 @@ async fn sender_name(
     name.or_else(|| Some(content.metadata.sender.service_id_string()))
 }
 
-fn data_message_body(data: &DataMessage, edited: bool) -> Option<(String, MessageKind, usize)> {
+fn data_message_body(
+    data: &DataMessage,
+    edited: bool,
+) -> Option<(String, MessageKind, Vec<AttachmentPointer>)> {
     let attachment_count = data.attachments.len();
     if let Some(body) = data.body.as_ref().filter(|body| !body.is_empty()) {
         return Some((
@@ -298,7 +368,7 @@ fn data_message_body(data: &DataMessage, edited: bool) -> Option<(String, Messag
             } else {
                 MessageKind::Text
             },
-            attachment_count,
+            data.attachments.clone(),
         ));
     }
 
@@ -316,12 +386,7 @@ fn data_message_body(data: &DataMessage, edited: bool) -> Option<(String, Messag
         let suffix = sticker.emoji.as_deref().unwrap_or("");
         (format!("[sticker{suffix}]"), MessageKind::Sticker)
     } else if attachment_count > 0 {
-        let label = if attachment_count == 1 {
-            "attachment".into()
-        } else {
-            format!("{attachment_count} attachments")
-        };
-        (format!("[{label}]"), MessageKind::Attachment)
+        (String::new(), MessageKind::Attachment)
     } else if let Some(poll) = &data.poll_create {
         let question = poll.question.as_deref().unwrap_or("poll");
         (format!("[poll: {question}]"), MessageKind::Poll)
@@ -347,7 +412,7 @@ fn data_message_body(data: &DataMessage, edited: bool) -> Option<(String, Messag
             body
         },
         if edited { MessageKind::Edited } else { kind },
-        attachment_count,
+        data.attachments.clone(),
     ))
 }
 
@@ -375,20 +440,26 @@ pub async fn display_message(
                     .as_ref()
                     .and_then(|data| data_message_body(data, true))
             } else if sent.story_message.is_some() {
-                Some(("[story]".into(), MessageKind::Story, 0))
+                Some(("[story]".into(), MessageKind::Story, Vec::new()))
             } else {
                 None
             };
             (true, rendered)
         }
-        ContentBody::CallMessage(_) => (false, Some(("[call event]".into(), MessageKind::Call, 0))),
-        ContentBody::StoryMessage(_) => (false, Some(("[story]".into(), MessageKind::Story, 0))),
+        ContentBody::CallMessage(_) => (
+            false,
+            Some(("[call event]".into(), MessageKind::Call, Vec::new())),
+        ),
+        ContentBody::StoryMessage(_) => (
+            false,
+            Some(("[story]".into(), MessageKind::Story, Vec::new())),
+        ),
         ContentBody::DecryptionErrorMessage(_) => (
             false,
             Some((
                 "[message could not be decrypted]".into(),
                 MessageKind::NonText,
-                0,
+                Vec::new(),
             )),
         ),
         ContentBody::NullMessage(_)
@@ -397,9 +468,10 @@ pub async fn display_message(
         | ContentBody::TypingMessage(_)
         | ContentBody::PniSignatureMessage(_) => return None,
     };
-    let (body, kind, attachment_count) = rendered?;
+    let (body, kind, attachment_pointers) = rendered?;
+    let timestamp = content.timestamp();
     Some(ChatMessage {
-        timestamp: content.timestamp(),
+        timestamp,
         mine,
         sender: if mine {
             None
@@ -408,7 +480,7 @@ pub async fn display_message(
         },
         body,
         kind,
-        attachment_count,
+        attachments: chat_attachments(timestamp, &attachment_pointers),
     })
 }
 
@@ -448,7 +520,7 @@ pub async fn send(
         sender: None,
         body: text,
         kind: MessageKind::Text,
-        attachment_count: 0,
+        attachments: Vec::new(),
     })
 }
 
@@ -510,8 +582,8 @@ mod tests {
     use presage::libsignal_service::proto::{data_message, AttachmentPointer, DataMessage};
 
     use super::{
-        data_message_body, matching_conversations, transparent_qr, Conversation, ConversationId,
-        MessageKind,
+        chat_attachments, data_message_body, matching_conversations, transparent_qr, Conversation,
+        ConversationId, MessageKind,
     };
 
     #[test]
@@ -561,7 +633,11 @@ mod tests {
         };
         assert_eq!(
             data_message_body(&data, false),
-            Some(("caption".into(), MessageKind::Text, 1))
+            Some((
+                "caption".into(),
+                MessageKind::Text,
+                vec![AttachmentPointer::default()]
+            ))
         );
     }
 
@@ -576,7 +652,7 @@ mod tests {
         };
         assert_eq!(
             data_message_body(&reaction, false),
-            Some(("[reaction 👍]".into(), MessageKind::Reaction, 0))
+            Some(("[reaction 👍]".into(), MessageKind::Reaction, Vec::new()))
         );
 
         let attachment = DataMessage {
@@ -585,7 +661,11 @@ mod tests {
         };
         assert_eq!(
             data_message_body(&attachment, false),
-            Some(("[2 attachments]".into(), MessageKind::Attachment, 2))
+            Some((
+                String::new(),
+                MessageKind::Attachment,
+                vec![AttachmentPointer::default(), AttachmentPointer::default()]
+            ))
         );
 
         let poll = DataMessage {
@@ -597,12 +677,34 @@ mod tests {
         };
         assert_eq!(
             data_message_body(&poll, false),
-            Some(("[poll: Lunch?]".into(), MessageKind::Poll, 0))
+            Some(("[poll: Lunch?]".into(), MessageKind::Poll, Vec::new()))
         );
     }
 
     #[test]
     fn transport_only_data_is_omitted() {
         assert_eq!(data_message_body(&DataMessage::default(), false), None);
+    }
+
+    #[test]
+    fn attachment_metadata_and_preview_limits_are_preserved() {
+        let pointer = AttachmentPointer {
+            digest: Some(vec![0xab; 32]),
+            file_name: Some("photo.jpg".into()),
+            content_type: Some("image/jpeg".into()),
+            size: Some(2_000_000),
+            width: Some(1_600),
+            height: Some(1_200),
+            ..Default::default()
+        };
+        let attachment = chat_attachments(42, &[pointer])[0].clone();
+        assert_eq!(attachment.key, "ab".repeat(32));
+        assert_eq!(attachment.display_name(), "photo.jpg");
+        assert!(attachment.can_preview());
+
+        let mut oversized = attachment;
+        oversized.width = Some(10_000);
+        oversized.height = Some(10_000);
+        assert!(!oversized.can_preview());
     }
 }

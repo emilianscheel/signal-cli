@@ -1,4 +1,5 @@
 mod app;
+mod attachments;
 mod backend;
 mod cli;
 mod preferences;
@@ -39,7 +40,17 @@ fn preference_path(path: &std::path::Path) -> PathBuf {
     PathBuf::from(preference)
 }
 
-fn remove_local_data(path: &std::path::Path, preferences: &std::path::Path) -> Result<()> {
+fn attachment_cache_path(path: &std::path::Path) -> PathBuf {
+    let mut cache = path.as_os_str().to_os_string();
+    cache.push(".attachments");
+    PathBuf::from(cache)
+}
+
+fn remove_local_data(
+    path: &std::path::Path,
+    preferences: &std::path::Path,
+    attachments: &std::path::Path,
+) -> Result<()> {
     let mut candidates = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
         let mut candidate = path.as_os_str().to_os_string();
@@ -59,6 +70,14 @@ fn remove_local_data(path: &std::path::Path, preferences: &std::path::Path) -> R
                 return Err(error)
                     .with_context(|| format!("remove local data {}", candidate.display()));
             }
+        }
+    }
+    match std::fs::remove_dir_all(attachments) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("remove attachment cache {}", attachments.display()));
         }
     }
     Ok(())
@@ -125,6 +144,7 @@ async fn run(args: Args) -> Result<()> {
     let custom_data_path = args.data.is_some();
     let path = data_path(args.data)?;
     let ui_preferences_path = preference_path(&path);
+    let attachment_cache_path = attachment_cache_path(&path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create data directory {}", parent.display()))?;
@@ -141,6 +161,7 @@ async fn run(args: Args) -> Result<()> {
 
     let local = tokio::task::LocalSet::new();
     let app_preferences_path = ui_preferences_path.clone();
+    let app_attachment_cache_path = attachment_cache_path.clone();
     let disconnected = local
         .run_until(async move {
             let mut manager: Manager<SqliteStore, Registered> =
@@ -153,15 +174,19 @@ async fn run(args: Args) -> Result<()> {
                 cli::run(&mut manager, command, json_output).await?;
                 Ok(false)
             } else {
-                App::new(manager, PreferencesStore::new(app_preferences_path))
-                    .run()
-                    .await
+                App::new(
+                    manager,
+                    PreferencesStore::new(app_preferences_path),
+                    app_attachment_cache_path,
+                )
+                .run()
+                .await
             }
         })
         .await?;
 
     if disconnected {
-        remove_local_data(&path, &ui_preferences_path)?;
+        remove_local_data(&path, &ui_preferences_path, &attachment_cache_path)?;
     }
     Ok(())
 }
@@ -188,7 +213,8 @@ mod tests {
     use clap::Parser;
 
     use super::{
-        cli::Command, data_path, preference_path, protect_local_data, remove_local_data, Args,
+        attachment_cache_path, cli::Command, data_path, preference_path, protect_local_data,
+        remove_local_data, Args,
     };
     use std::path::PathBuf;
 
@@ -232,19 +258,23 @@ mod tests {
         std::fs::write(directory.path().join("signal.db-wal"), "wal").unwrap();
         std::fs::write(directory.path().join("signal.db-shm"), "shm").unwrap();
         let preferences = preference_path(&database);
+        let attachments = attachment_cache_path(&database);
+        std::fs::create_dir(&attachments).unwrap();
+        std::fs::write(attachments.join("cached-image"), "image").unwrap();
         std::fs::write(&preferences, "preferences").unwrap();
         let mut temporary_preferences = preferences.as_os_str().to_os_string();
         temporary_preferences.push(".tmp");
         let temporary_preferences = PathBuf::from(temporary_preferences);
         std::fs::write(&temporary_preferences, "temporary").unwrap();
 
-        remove_local_data(&database, &preferences).unwrap();
+        remove_local_data(&database, &preferences, &attachments).unwrap();
 
         assert!(!database.exists());
         assert!(!directory.path().join("signal.db-wal").exists());
         assert!(!directory.path().join("signal.db-shm").exists());
         assert!(!preferences.exists());
         assert!(!temporary_preferences.exists());
+        assert!(!attachments.exists());
     }
 
     #[test]
