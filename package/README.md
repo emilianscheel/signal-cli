@@ -205,8 +205,8 @@ cargo clippy --manifest-path package/Cargo.toml --locked --all-targets -- -D war
 The project is AGPL-3.0-only because its Signal client dependency, Presage, is
 AGPL-3.0-only.
 
-## Releasees
+## Release
 
 ```sh
-git tag -a v0.2.0 -m "Release v0.2.0" && git push origin main v0.2.0
+git tag -a v0.3.1 -m "v0.3.1" && git push origin main v0.3.1
 ```
