@@ -98,6 +98,11 @@ fn logo<'a>() -> Line<'a> {
 }
 
 fn status_spans(status: &str) -> Vec<Span<'_>> {
+    let status = if status.eq_ignore_ascii_case("Connected to Signal CLI") {
+        "Connected"
+    } else {
+        status
+    };
     if status == "Connected" {
         vec![
             Span::styled("● ", Style::default().fg(Color::Green)),
@@ -438,7 +443,7 @@ fn wrap_text(input: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{muted, primary, shell, wide_columns, wrap_text, SIDEBAR_WIDTH};
+    use super::{muted, primary, shell, status_spans, wide_columns, wrap_text, SIDEBAR_WIDTH};
     use ratatui::{
         layout::Rect,
         style::{Color, Modifier},
@@ -468,5 +473,15 @@ mod tests {
         assert_eq!(sidebar.width, SIDEBAR_WIDTH);
         assert_eq!(chat.width, 120 - SIDEBAR_WIDTH);
         assert_eq!(chat.x, SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn connected_status_omits_device_name() {
+        let spans = status_spans("Connected to Signal CLI");
+        let rendered = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered, "● Connected");
     }
 }
