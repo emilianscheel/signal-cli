@@ -15,9 +15,10 @@ use ratatui::{
     Terminal,
 };
 
-use crate::app::{App, Screen};
+use crate::app::{App, LayoutMode, Screen};
 
 const ACCENT: Color = Color::Rgb(70, 130, 255);
+pub const SIDEBAR_WIDTH: u16 = 32;
 
 fn primary() -> Style {
     Style::default().fg(Color::Reset)
@@ -41,11 +42,7 @@ impl TerminalSession {
     }
 
     pub fn draw(&mut self, app: &App) -> Result<()> {
-        self.terminal.draw(|frame| match app.screen {
-            Screen::Conversations => draw_conversations(frame, app),
-            Screen::Chat => draw_chat(frame, app),
-            Screen::DisconnectConfirm => draw_disconnect_confirm(frame),
-        })?;
+        self.terminal.draw(|frame| draw_app(frame, app))?;
         Ok(())
     }
 }
@@ -58,7 +55,22 @@ impl Drop for TerminalSession {
     }
 }
 
-fn shell(frame: &mut ratatui::Frame<'_>) -> (Rect, Rect, Rect) {
+fn draw_app(frame: &mut ratatui::Frame<'_>, app: &App) {
+    if app.screen == Screen::DisconnectConfirm {
+        draw_disconnect_confirm(frame);
+        return;
+    }
+    match app.layout_mode() {
+        LayoutMode::Narrow => match app.screen {
+            Screen::Conversations => draw_narrow_conversations(frame, app),
+            Screen::Chat => draw_narrow_chat(frame, app),
+            Screen::DisconnectConfirm => unreachable!(),
+        },
+        LayoutMode::Wide => draw_wide(frame, app),
+    }
+}
+
+fn shell(area: Rect) -> (Rect, Rect, Rect) {
     let [header, body, footer] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -66,8 +78,16 @@ fn shell(frame: &mut ratatui::Frame<'_>) -> (Rect, Rect, Rect) {
             Constraint::Min(1),
             Constraint::Length(2),
         ])
-        .areas(frame.area());
+        .areas(area);
     (header, body, footer)
+}
+
+fn wide_columns(area: Rect) -> (Rect, Rect) {
+    let [sidebar, chat] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+        .areas(area);
+    (sidebar, chat)
 }
 
 fn logo<'a>() -> Line<'a> {
@@ -88,13 +108,30 @@ fn status_spans(status: &str) -> Vec<Span<'_>> {
     }
 }
 
-fn draw_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
-    let (header, body, footer) = shell(frame);
+fn render_logo(frame: &mut ratatui::Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(logo()).block(Block::default().padding(Padding::horizontal(1))),
-        header,
+        area,
     );
+}
 
+fn render_chat_header(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect, with_logo: bool) {
+    let title = app
+        .opened_conversation()
+        .map(|conversation| conversation.title.as_str())
+        .unwrap_or("Signal");
+    let mut spans = if with_logo { logo().spans } else { Vec::new() };
+    if with_logo {
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::styled(title, muted()));
+    frame.render_widget(
+        Paragraph::new(Line::from(spans)).block(Block::default().padding(Padding::horizontal(1))),
+        area,
+    );
+}
+
+fn conversation_list(app: &App, wide: bool, focused: bool) -> List<'static> {
     let content = if app.conversations.is_empty() {
         vec![ListItem::new(Text::from(vec![
             Line::from("No conversations synced yet"),
@@ -137,14 +174,121 @@ fn draw_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
             })
             .collect()
     };
-    let list = List::new(content).block(
+    let borders = if wide {
+        Borders::TOP | Borders::RIGHT
+    } else {
+        Borders::TOP
+    };
+    let border_style = if focused {
+        Style::default().fg(ACCENT)
+    } else {
+        muted()
+    };
+    List::new(content).block(
         Block::default()
             .title(" Chats ")
-            .borders(Borders::TOP)
-            .padding(Padding::horizontal(2)),
+            .borders(borders)
+            .border_style(border_style)
+            .padding(Padding::horizontal(if wide { 1 } else { 2 })),
+    )
+}
+
+fn render_messages(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect) {
+    if app.opened_conversation().is_none() {
+        frame.render_widget(
+            Paragraph::new(Line::styled(
+                "Your conversations will appear here after Signal syncs.",
+                muted(),
+            ))
+            .wrap(Wrap { trim: true })
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .padding(Padding::horizontal(2)),
+            ),
+            area,
+        );
+        return;
+    }
+
+    let title = app
+        .opened_conversation()
+        .map(|conversation| conversation.title.as_str())
+        .unwrap_or("Signal");
+    let width = area.width.saturating_sub(6).max(20) as usize;
+    let mut lines = Vec::new();
+    for message in &app.messages {
+        let time = Local
+            .timestamp_millis_opt(message.timestamp as i64)
+            .single()
+            .map(|date| date.format("%H:%M").to_string())
+            .unwrap_or_default();
+        let author = if message.mine {
+            "you".to_string()
+        } else {
+            message.sender.clone().unwrap_or_else(|| title.to_string())
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                author,
+                Style::default()
+                    .fg(if message.mine { ACCENT } else { Color::Green })
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("  {time}"), muted()),
+        ]));
+        for wrapped in wrap_text(&message.body, width) {
+            lines.push(Line::raw(wrapped));
+        }
+        lines.push(Line::raw(""));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled("No messages yet. Say hello.", muted()));
+    }
+    let total_lines = lines.len() as u16;
+    let available = area.height.saturating_sub(2);
+    let bottom = total_lines.saturating_sub(available);
+    let scroll = bottom.saturating_sub(app.scroll.min(bottom));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .block(
+                Block::default()
+                    .borders(Borders::TOP)
+                    .padding(Padding::horizontal(2)),
+            ),
+        area,
     );
-    frame.render_widget(list, body);
-    let mut footer_spans = vec![
+}
+
+fn render_composer(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect, focused: bool) {
+    let border_style = if focused {
+        Style::default().fg(ACCENT)
+    } else {
+        muted()
+    };
+    frame.render_widget(
+        Paragraph::new(app.input.as_str())
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(" Message ")
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .padding(Padding::horizontal(1)),
+            ),
+        area,
+    );
+    if focused && app.opened_conversation().is_some() {
+        let cursor_prefix = &app.input[..app.cursor];
+        let cursor_x = area.x + 2 + cursor_prefix.chars().count() as u16;
+        frame.set_cursor_position((cursor_x.min(area.right().saturating_sub(2)), area.y + 1));
+    }
+}
+
+fn conversation_footer(app: &App) -> Line<'_> {
+    let mut spans = vec![
         Span::styled("↑↓", primary()),
         Span::styled(" move   ", muted()),
         Span::styled("enter", primary()),
@@ -153,21 +297,86 @@ fn draw_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
         Span::styled(" refresh   ", muted()),
         Span::styled("d", primary()),
         Span::styled(" Disconnect   ", muted()),
+        Span::styled("esc", primary()),
+        Span::styled(" quit   ", muted()),
     ];
-    footer_spans.extend(status_spans(&app.status));
+    spans.extend(status_spans(&app.status));
+    Line::from(spans)
+}
+
+fn chat_footer(app: &App, wide: bool) -> Line<'_> {
+    let mut spans = vec![
+        Span::styled("enter", primary()),
+        Span::styled(" send   ", muted()),
+        Span::styled("esc", primary()),
+        Span::styled(if wide { " sidebar   " } else { " chats   " }, muted()),
+        Span::styled("pgup/dn", primary()),
+        Span::styled(" scroll   ", muted()),
+        Span::styled("ctrl-c", primary()),
+        Span::styled(" quit   ", muted()),
+    ];
+    spans.extend(status_spans(&app.status));
+    Line::from(spans)
+}
+
+fn render_footer(frame: &mut ratatui::Frame<'_>, line: Line<'_>, area: Rect) {
     frame.render_widget(
-        Paragraph::new(Line::from(footer_spans))
-            .block(Block::default().padding(Padding::horizontal(1))),
-        footer,
+        Paragraph::new(line).block(Block::default().padding(Padding::horizontal(1))),
+        area,
     );
 }
 
-fn draw_disconnect_confirm(frame: &mut ratatui::Frame<'_>) {
-    let (header, body, footer) = shell(frame);
+fn draw_narrow_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let (header, body, footer) = shell(frame.area());
+    render_logo(frame, header);
+    frame.render_widget(conversation_list(app, false, true), body);
+    render_footer(frame, conversation_footer(app), footer);
+}
+
+fn draw_narrow_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let [header, messages, input, footer] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(3),
+            Constraint::Length(4),
+            Constraint::Length(2),
+        ])
+        .areas(frame.area());
+    render_chat_header(frame, app, header, true);
+    render_messages(frame, app, messages);
+    render_composer(frame, app, input, true);
+    render_footer(frame, chat_footer(app, false), footer);
+}
+
+fn draw_wide(frame: &mut ratatui::Frame<'_>, app: &App) {
+    let (header, body, footer) = shell(frame.area());
+    let (sidebar_header, chat_header) = wide_columns(header);
+    let (sidebar, chat) = wide_columns(body);
+    let [messages, input] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(4)])
+        .areas(chat);
+
+    render_logo(frame, sidebar_header);
+    render_chat_header(frame, app, chat_header, false);
     frame.render_widget(
-        Paragraph::new(logo()).block(Block::default().padding(Padding::horizontal(1))),
-        header,
+        conversation_list(app, true, app.screen == Screen::Conversations),
+        sidebar,
     );
+    render_messages(frame, app, messages);
+    render_composer(frame, app, input, app.screen == Screen::Chat);
+    let footer_line = if app.screen == Screen::Conversations {
+        conversation_footer(app)
+    } else {
+        chat_footer(app, true)
+    };
+    render_footer(frame, footer_line, footer);
+}
+
+fn draw_disconnect_confirm(frame: &mut ratatui::Frame<'_>) {
+    let (header, body, footer) = shell(frame.area());
+    render_logo(frame, header);
 
     let warning = Text::from(vec![
         Line::styled(
@@ -194,117 +403,14 @@ fn draw_disconnect_confirm(frame: &mut ratatui::Frame<'_>) {
         ),
         body,
     );
-
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
+    render_footer(
+        frame,
+        Line::from(vec![
             Span::styled("y", Style::default().fg(Color::Red)),
             Span::styled(" Disconnect and erase local data   ", muted()),
             Span::styled("esc/n", primary()),
             Span::styled(" Cancel", muted()),
-        ]))
-        .block(Block::default().padding(Padding::horizontal(1))),
-        footer,
-    );
-}
-
-fn draw_chat(frame: &mut ratatui::Frame<'_>, app: &App) {
-    let [header, messages, input, footer] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(3),
-            Constraint::Length(4),
-            Constraint::Length(2),
-        ])
-        .areas(frame.area());
-    let title = app.active().map(|c| c.title.as_str()).unwrap_or("Signal");
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            logo().spans[0].clone(),
-            logo().spans[1].clone(),
-            Span::raw("  "),
-            Span::styled(title, muted()),
-        ]))
-        .block(Block::default().padding(Padding::horizontal(1))),
-        header,
-    );
-
-    let width = messages.width.saturating_sub(6).max(20) as usize;
-    let mut lines = Vec::new();
-    for message in &app.messages {
-        let time = Local
-            .timestamp_millis_opt(message.timestamp as i64)
-            .single()
-            .map(|d| d.format("%H:%M").to_string())
-            .unwrap_or_default();
-        let author = if message.mine {
-            "you".to_string()
-        } else {
-            message.sender.clone().unwrap_or_else(|| title.to_string())
-        };
-        lines.push(Line::from(vec![
-            Span::styled(
-                author,
-                Style::default()
-                    .fg(if message.mine { ACCENT } else { Color::Green })
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(format!("  {time}"), muted()),
-        ]));
-        for wrapped in wrap_text(&message.body, width) {
-            lines.push(Line::raw(wrapped));
-        }
-        lines.push(Line::raw(""));
-    }
-    if lines.is_empty() {
-        lines.push(Line::styled("No messages yet. Say hello.", muted()));
-    }
-    let total_lines = lines.len() as u16;
-    let available = messages.height.saturating_sub(2);
-    let bottom = total_lines.saturating_sub(available);
-    let scroll = bottom.saturating_sub(app.scroll.min(bottom));
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0))
-            .block(
-                Block::default()
-                    .borders(Borders::TOP)
-                    .padding(Padding::horizontal(2)),
-            ),
-        messages,
-    );
-
-    frame.render_widget(
-        Paragraph::new(app.input.as_str())
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(" Message ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(ACCENT))
-                    .padding(Padding::horizontal(1)),
-            ),
-        input,
-    );
-    let cursor_prefix = &app.input[..app.cursor];
-    let cursor_x = input.x + 2 + cursor_prefix.chars().count() as u16;
-    frame.set_cursor_position((cursor_x.min(input.right().saturating_sub(2)), input.y + 1));
-
-    let mut footer_spans = vec![
-        Span::styled("enter", primary()),
-        Span::styled(" send   ", muted()),
-        Span::styled("esc", primary()),
-        Span::styled(" chats   ", muted()),
-        Span::styled("pgup/dn", primary()),
-        Span::styled(" scroll   ", muted()),
-        Span::styled("ctrl-c", primary()),
-        Span::styled(" quit   ", muted()),
-    ];
-    footer_spans.extend(status_spans(&app.status));
-    frame.render_widget(
-        Paragraph::new(Line::from(footer_spans))
-            .block(Block::default().padding(Padding::horizontal(1))),
+        ]),
         footer,
     );
 }
@@ -332,8 +438,11 @@ fn wrap_text(input: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{muted, primary, wrap_text};
-    use ratatui::style::{Color, Modifier};
+    use super::{muted, primary, shell, wide_columns, wrap_text, SIDEBAR_WIDTH};
+    use ratatui::{
+        layout::Rect,
+        style::{Color, Modifier},
+    };
 
     #[test]
     fn wraps_at_word_boundaries() {
@@ -350,5 +459,14 @@ mod tests {
         assert_eq!(primary().fg, Some(Color::Reset));
         assert_eq!(muted().fg, Some(Color::Reset));
         assert!(muted().add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn wide_layout_has_fixed_32_column_sidebar() {
+        let (_, body, _) = shell(Rect::new(0, 0, 120, 40));
+        let (sidebar, chat) = wide_columns(body);
+        assert_eq!(sidebar.width, SIDEBAR_WIDTH);
+        assert_eq!(chat.width, 120 - SIDEBAR_WIDTH);
+        assert_eq!(chat.x, SIDEBAR_WIDTH);
     }
 }

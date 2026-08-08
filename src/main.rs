@@ -1,5 +1,6 @@
 mod app;
 mod backend;
+mod preferences;
 mod ui;
 
 use std::path::PathBuf;
@@ -10,7 +11,7 @@ use directories::ProjectDirs;
 use presage::{manager::Registered, model::identity::OnNewIdentity, Manager};
 use presage_store_sqlite::SqliteStore;
 
-use crate::{app::App, backend::link_device};
+use crate::{app::App, backend::link_device, preferences::PreferencesStore};
 
 #[cfg(unix)]
 fn protect_local_data(path: &std::path::Path, protect_parent: bool) -> Result<()> {
@@ -31,11 +32,25 @@ fn protect_local_data(_path: &std::path::Path, _protect_parent: bool) -> Result<
     Ok(())
 }
 
-fn remove_local_data(path: &std::path::Path) -> Result<()> {
+fn preference_path(path: &std::path::Path) -> PathBuf {
+    let mut preference = path.as_os_str().to_os_string();
+    preference.push(".ui.json");
+    PathBuf::from(preference)
+}
+
+fn remove_local_data(path: &std::path::Path, preferences: &std::path::Path) -> Result<()> {
+    let mut candidates = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
         let mut candidate = path.as_os_str().to_os_string();
         candidate.push(suffix);
-        let candidate = PathBuf::from(candidate);
+        candidates.push(PathBuf::from(candidate));
+    }
+    candidates.push(preferences.to_path_buf());
+    let mut temporary_preferences = preferences.as_os_str().to_os_string();
+    temporary_preferences.push(".tmp");
+    candidates.push(PathBuf::from(temporary_preferences));
+
+    for candidate in candidates {
         match std::fs::remove_file(&candidate) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -101,6 +116,7 @@ async fn main() -> Result<()> {
 
     let custom_data_path = args.data.is_some();
     let path = data_path(args.data)?;
+    let ui_preferences_path = preference_path(&path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create data directory {}", parent.display()))?;
@@ -116,6 +132,7 @@ async fn main() -> Result<()> {
         .context("restrict permissions on the local Signal database")?;
 
     let local = tokio::task::LocalSet::new();
+    let app_preferences_path = ui_preferences_path.clone();
     let disconnected = local
         .run_until(async move {
             let manager: Manager<SqliteStore, Registered> =
@@ -124,19 +141,21 @@ async fn main() -> Result<()> {
                     Err(_) => link_device(store, args.device_name).await?,
                 };
 
-            App::new(manager).run().await
+            App::new(manager, PreferencesStore::new(app_preferences_path))
+                .run()
+                .await
         })
         .await?;
 
     if disconnected {
-        remove_local_data(&path)?;
+        remove_local_data(&path, &ui_preferences_path)?;
     }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{data_path, protect_local_data, remove_local_data};
+    use super::{data_path, preference_path, protect_local_data, remove_local_data};
     use std::path::PathBuf;
 
     #[test]
@@ -178,11 +197,19 @@ mod tests {
         std::fs::write(&database, "database").unwrap();
         std::fs::write(directory.path().join("signal.db-wal"), "wal").unwrap();
         std::fs::write(directory.path().join("signal.db-shm"), "shm").unwrap();
+        let preferences = preference_path(&database);
+        std::fs::write(&preferences, "preferences").unwrap();
+        let mut temporary_preferences = preferences.as_os_str().to_os_string();
+        temporary_preferences.push(".tmp");
+        let temporary_preferences = PathBuf::from(temporary_preferences);
+        std::fs::write(&temporary_preferences, "temporary").unwrap();
 
-        remove_local_data(&database).unwrap();
+        remove_local_data(&database, &preferences).unwrap();
 
         assert!(!database.exists());
         assert!(!directory.path().join("signal.db-wal").exists());
         assert!(!directory.path().join("signal.db-shm").exists());
+        assert!(!preferences.exists());
+        assert!(!temporary_preferences.exists());
     }
 }

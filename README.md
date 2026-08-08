@@ -16,6 +16,8 @@ Code.
 - Direct and group text messages
 - Local message history (up to the latest 250 messages per chat)
 - Unicode editing and keyboard-only navigation
+- Responsive 32-column chat sidebar in terminals 120 columns or wider
+- Last-opened chat restoration across launches
 - Restrictive default `0700` data-directory and `0600` database permissions on Unix
 
 Signal does not provide a single API token. This program performs the same
@@ -66,6 +68,12 @@ The database is stored in the operating system's local data directory. Use
 | Chat | `PageUp`/`PageDown` | Scroll message history |
 | Chat | `Esc` | Return to the chat list |
 | Anywhere | `Ctrl-C` | Quit safely |
+
+At widths of 120 columns or more, chats remain visible in a fixed 32-column
+sidebar. Press `Esc` to focus the sidebar, move with the arrow keys, and press
+`Enter` to open the highlighted chat and return focus to the composer. Narrower
+terminals retain the separate chat-list and chat screens. The last opened chat
+is remembered in a private local preference file.
 
 ## Security and scope
 

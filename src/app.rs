@@ -11,8 +11,40 @@ use tokio::sync::mpsc;
 
 use crate::{
     backend::{self, ChatMessage, Conversation, NetworkEvent},
+    preferences::PreferencesStore,
     ui::TerminalSession,
 };
+
+pub const WIDE_BREAKPOINT: u16 = 120;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutMode {
+    Narrow,
+    Wide,
+}
+
+impl LayoutMode {
+    pub const fn for_width(width: u16) -> Self {
+        if width >= WIDE_BREAKPOINT {
+            Self::Wide
+        } else {
+            Self::Narrow
+        }
+    }
+}
+
+fn remembered_selection(
+    conversations: &[Conversation],
+    remembered: Option<&backend::ConversationId>,
+) -> usize {
+    remembered
+        .and_then(|id| {
+            conversations
+                .iter()
+                .position(|conversation| &conversation.id == id)
+        })
+        .unwrap_or(0)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -25,6 +57,7 @@ pub struct App {
     manager: Manager<SqliteStore, Registered>,
     pub conversations: Vec<Conversation>,
     pub selected: usize,
+    opened: Option<backend::ConversationId>,
     pub messages: Vec<ChatMessage>,
     pub input: String,
     pub cursor: usize,
@@ -32,16 +65,19 @@ pub struct App {
     pub screen: Screen,
     pub status: String,
     pub sending: bool,
+    pub terminal_width: u16,
+    preferences: PreferencesStore,
     receiver: Option<tokio::task::JoinHandle<()>>,
     disconnected: bool,
 }
 
 impl App {
-    pub fn new(manager: Manager<SqliteStore, Registered>) -> Self {
+    pub fn new(manager: Manager<SqliteStore, Registered>, preferences: PreferencesStore) -> Self {
         Self {
             manager,
             conversations: Vec::new(),
             selected: 0,
+            opened: None,
             messages: Vec::new(),
             input: String::new(),
             cursor: 0,
@@ -49,19 +85,33 @@ impl App {
             screen: Screen::Conversations,
             status: "Connecting…".into(),
             sending: false,
+            terminal_width: 0,
+            preferences,
             receiver: None,
             disconnected: false,
         }
     }
 
-    pub fn active(&self) -> Option<&Conversation> {
+    pub fn selected_conversation(&self) -> Option<&Conversation> {
         self.conversations.get(self.selected)
     }
 
+    pub fn opened_conversation(&self) -> Option<&Conversation> {
+        let opened = self.opened.as_ref()?;
+        self.conversations
+            .iter()
+            .find(|conversation| &conversation.id == opened)
+    }
+
+    pub const fn layout_mode(&self) -> LayoutMode {
+        LayoutMode::for_width(self.terminal_width)
+    }
+
     async fn refresh_conversations(&mut self) -> Result<()> {
-        let active = self.active().map(|c| c.id.clone());
+        let selected = self.selected_conversation().map(|c| c.id.clone());
+        let opened = self.opened.clone();
         self.conversations = backend::conversations(&self.manager).await?;
-        if let Some(id) = active {
+        if let Some(id) = selected {
             self.selected = self
                 .conversations
                 .iter()
@@ -72,25 +122,59 @@ impl App {
                 .selected
                 .min(self.conversations.len().saturating_sub(1));
         }
+        self.opened = opened.filter(|id| {
+            self.conversations
+                .iter()
+                .any(|conversation| &conversation.id == id)
+        });
+        if self.opened.is_none() {
+            self.messages.clear();
+        }
         Ok(())
     }
 
-    async fn open_selected(&mut self) -> Result<()> {
-        let Some(conversation) = self.active().cloned() else {
+    async fn load_selected(&mut self, focus_chat: bool) -> Result<()> {
+        let Some(conversation) = self.selected_conversation().cloned() else {
             self.status =
                 "No chats yet — leave Signal open on your phone while contacts sync".into();
             return Ok(());
         };
         self.messages = backend::history(&self.manager, &conversation).await?;
+        self.opened = Some(conversation.id.clone());
         self.scroll = 0;
-        self.screen = Screen::Chat;
-        self.status = "Connected".into();
+        if focus_chat {
+            self.screen = Screen::Chat;
+        }
+        self.status = match self.preferences.save_last_conversation(&conversation.id) {
+            Ok(()) => "Connected".into(),
+            Err(error) => format!("Connected · could not remember chat: {error:#}"),
+        };
+        Ok(())
+    }
+
+    async fn ensure_wide_chat(&mut self) -> Result<()> {
+        if self.layout_mode() == LayoutMode::Wide
+            && self.opened.is_none()
+            && !self.conversations.is_empty()
+            && self.screen != Screen::DisconnectConfirm
+        {
+            self.load_selected(false).await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_resize(&mut self, width: u16) -> Result<()> {
+        let previous = self.layout_mode();
+        self.terminal_width = width;
+        if previous == LayoutMode::Narrow && self.layout_mode() == LayoutMode::Wide {
+            self.ensure_wide_chat().await?;
+        }
         Ok(())
     }
 
     async fn send_input(&mut self) {
         let text = self.input.trim().to_string();
-        let Some(conversation) = self.active().cloned() else {
+        let Some(conversation) = self.opened_conversation().cloned() else {
             return;
         };
         if text.is_empty() || self.sending {
@@ -143,8 +227,11 @@ impl App {
                     self.selected =
                         (self.selected + 1).min(self.conversations.len().saturating_sub(1));
                 }
-                KeyCode::Enter => self.open_selected().await?,
-                KeyCode::Char('r') => self.refresh_conversations().await?,
+                KeyCode::Enter => self.load_selected(true).await?,
+                KeyCode::Char('r') => {
+                    self.refresh_conversations().await?;
+                    self.ensure_wide_chat().await?;
+                }
                 KeyCode::Char('d') => self.screen = Screen::DisconnectConfirm,
                 _ => {}
             },
@@ -212,8 +299,11 @@ impl App {
     async fn handle_network(&mut self, event: NetworkEvent) -> Result<()> {
         match event {
             NetworkEvent::Message(id) => {
-                if self.active().is_some_and(|c| c.id == id) && self.screen == Screen::Chat {
-                    let conversation = self.active().cloned().expect("active chat");
+                if self.opened.as_ref().is_some_and(|opened| opened == &id) {
+                    let conversation = self
+                        .opened_conversation()
+                        .cloned()
+                        .expect("opened chat exists");
                     self.messages = backend::history(&self.manager, &conversation).await?;
                     self.scroll = 0;
                 }
@@ -221,6 +311,7 @@ impl App {
             }
             NetworkEvent::ConversationsChanged => {
                 self.refresh_conversations().await?;
+                self.ensure_wide_chat().await?;
                 self.status = "Contacts synced".into();
             }
             NetworkEvent::QueueEmpty => self.status = "Connected".into(),
@@ -230,7 +321,11 @@ impl App {
     }
 
     pub async fn run(mut self) -> Result<bool> {
+        self.terminal_width = crossterm::terminal::size()?.0;
+        let remembered = self.preferences.load_last_conversation();
         self.refresh_conversations().await?;
+        self.selected = remembered_selection(&self.conversations, remembered.as_ref());
+        self.ensure_wide_chat().await?;
         let (network_tx, mut network_rx) = mpsc::unbounded_channel();
         self.receiver = Some(backend::start_receiver(self.manager.clone(), network_tx));
         let mut terminal = TerminalSession::start()?;
@@ -241,6 +336,7 @@ impl App {
             tokio::select! {
                 event = events.next() => match event {
                     Some(Ok(Event::Key(key))) if self.handle_key(key).await? => break,
+                    Some(Ok(Event::Resize(width, _))) => self.handle_resize(width).await?,
                     Some(Err(error)) => return Err(error.into()),
                     None => break,
                     _ => {}
@@ -254,11 +350,47 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::Screen;
+    use super::{remembered_selection, LayoutMode, Screen, WIDE_BREAKPOINT};
+    use crate::backend::{Conversation, ConversationId};
 
     #[test]
     fn screens_are_distinct() {
         assert_ne!(Screen::Chat, Screen::Conversations);
         assert_ne!(Screen::DisconnectConfirm, Screen::Conversations);
+    }
+
+    #[test]
+    fn layout_switches_at_120_columns() {
+        assert_eq!(WIDE_BREAKPOINT, 120);
+        assert_eq!(LayoutMode::for_width(119), LayoutMode::Narrow);
+        assert_eq!(LayoutMode::for_width(120), LayoutMode::Wide);
+        assert_eq!(LayoutMode::for_width(200), LayoutMode::Wide);
+    }
+
+    #[test]
+    fn remembered_chat_is_selected_with_first_chat_fallback() {
+        let conversations = vec![
+            Conversation {
+                id: ConversationId::Group([1; 32]),
+                title: "One".into(),
+                subtitle: String::new(),
+                group_revision: Some(1),
+            },
+            Conversation {
+                id: ConversationId::Group([2; 32]),
+                title: "Two".into(),
+                subtitle: String::new(),
+                group_revision: Some(1),
+            },
+        ];
+        assert_eq!(
+            remembered_selection(&conversations, Some(&ConversationId::Group([2; 32]))),
+            1
+        );
+        assert_eq!(
+            remembered_selection(&conversations, Some(&ConversationId::Group([9; 32]))),
+            0
+        );
+        assert_eq!(remembered_selection(&conversations, None), 0);
     }
 }
