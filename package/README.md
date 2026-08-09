@@ -157,20 +157,23 @@ bytes.
 
 | Screen   | Key                 | Action                                  |
 | -------- | ------------------- | --------------------------------------- |
-| Chats    | `↑`/`↓` or `j`/`k`  | Select a conversation                   |
+| Chats    | Type text           | Filter chats by name or subtitle        |
+| Chats    | `Backspace`/`Delete` | Edit the chat search                    |
+| Chats    | `↑`/`↓`             | Select a matching conversation          |
 | Chats    | `Enter`             | Open the selected conversation          |
-| Chats    | `r`                 | Reload synced contacts and groups       |
-| Chats    | `d`, then `y`       | Erase local account data and disconnect |
+| Chats    | `Esc`               | Clear search, or quit when already empty |
+| Chats    | `Ctrl-R`            | Reload synced contacts and groups       |
+| Chats    | `Ctrl-D`, then `y`  | Erase local account data and disconnect |
 | Chat     | `Enter`             | Send the current message                |
 | Chat     | `PageUp`/`PageDown` | Scroll message history                  |
 | Chat     | `Esc`               | Return to the chat list                 |
 | Anywhere | `Ctrl-C`            | Quit safely                             |
 
 At widths of 120 columns or more, chats remain visible in a fixed 32-column
-sidebar. Press `Esc` to focus the sidebar, move with the arrow keys, and press
-`Enter` to open the highlighted chat and return focus to the composer. Narrower
-terminals retain the separate chat-list and chat screens. The last opened chat
-is remembered in a private local preference file.
+sidebar. Press `Esc` to focus the sidebar, type to filter chats, move with the
+arrow keys, and press `Enter` to open the highlighted chat and return focus to
+the composer. Narrower terminals retain the separate chat-list and chat
+screens. The last opened chat is remembered in a private local preference file.
 
 ## Security and scope
 

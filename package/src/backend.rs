@@ -58,6 +58,22 @@ pub struct Conversation {
     pub group_revision: Option<u32>,
 }
 
+fn contact_title(name: String, phone_number: Option<String>) -> String {
+    if !name.trim().is_empty() {
+        name
+    } else {
+        phone_number.unwrap_or_else(|| "Unknown contact".into())
+    }
+}
+
+fn group_title(title: String) -> String {
+    if title.trim().is_empty() {
+        "Unnamed group".into()
+    } else {
+        title
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
@@ -279,20 +295,12 @@ pub async fn conversations(
             ..
         } = contact;
         let id = ServiceId::Aci(uuid.into());
-        let title = if name.trim().is_empty() {
-            phone_number
-                .as_ref()
-                .map(ToString::to_string)
-                .unwrap_or_else(|| id.service_id_string())
-        } else {
-            name
-        };
+        let phone_number = phone_number.map(|number| number.to_string());
+        let title = contact_title(name, phone_number.clone());
         result.push(Conversation {
             id: ConversationId::Contact(id),
             title,
-            subtitle: phone_number
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "Signal contact".into()),
+            subtitle: phone_number.unwrap_or_else(|| "Signal contact".into()),
             group_revision: None,
         });
     }
@@ -309,11 +317,7 @@ pub async fn conversations(
         ) = group;
         result.push(Conversation {
             id: ConversationId::Group(key),
-            title: if title.is_empty() {
-                "Unnamed group".into()
-            } else {
-                title
-            },
+            title: group_title(title),
             subtitle: format!("{} members", members.len()),
             group_revision: Some(revision),
         });
@@ -420,15 +424,14 @@ async fn sender_name(
     content: &Content,
     manager: &Manager<SqliteStore, Registered>,
 ) -> Option<String> {
-    let name = manager
+    manager
         .store()
         .contact_by_id(&content.metadata.sender)
         .await
         .ok()
         .flatten()
         .map(|contact| contact.name)
-        .filter(|name| !name.is_empty());
-    name.or_else(|| Some(content.metadata.sender.service_id_string()))
+        .filter(|name| !name.trim().is_empty())
 }
 
 fn data_message_body(
@@ -664,8 +667,9 @@ mod tests {
     };
 
     use super::{
-        chat_attachments, content_attachment_pointers, data_message_body, matching_conversations,
-        transparent_qr, Conversation, ConversationId, MessageKind,
+        chat_attachments, contact_title, content_attachment_pointers, data_message_body,
+        group_title, matching_conversations, transparent_qr, Conversation, ConversationId,
+        MessageKind,
     };
 
     fn valid_pointer(byte: u8) -> AttachmentPointer {
@@ -691,6 +695,18 @@ mod tests {
             ConversationId::Group([42; 32]).stable_id(),
             format!("group:{}", "2a".repeat(32))
         );
+    }
+
+    #[test]
+    fn human_titles_never_fall_back_to_service_ids() {
+        assert_eq!(
+            contact_title("Vera Scheel".into(), Some("+49123".into())),
+            "Vera Scheel"
+        );
+        assert_eq!(contact_title("".into(), Some("+49123".into())), "+49123");
+        assert_eq!(contact_title("  ".into(), None), "Unknown contact");
+        assert_eq!(group_title("Friends".into()), "Friends");
+        assert_eq!(group_title("  ".into()), "Unnamed group");
     }
 
     #[test]

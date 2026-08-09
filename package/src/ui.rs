@@ -16,7 +16,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, List, ListItem, Padding, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Padding, Paragraph, Wrap},
     Terminal,
 };
 use ratatui_image::{
@@ -25,6 +25,7 @@ use ratatui_image::{
     thread::{ResizeRequest, ResizeResponse, ThreadImage, ThreadProtocol},
     Resize,
 };
+use unicode_width::UnicodeWidthChar;
 
 use crate::{
     app::{App, LayoutMode, Screen},
@@ -148,7 +149,7 @@ impl Drop for TerminalSession {
 
 fn draw_app(
     frame: &mut ratatui::Frame<'_>,
-    app: &App,
+    app: &mut App,
     picker: Option<Picker>,
     images: &mut HashMap<String, AsyncImage>,
     redraw: &tokio::sync::mpsc::UnboundedSender<()>,
@@ -244,38 +245,46 @@ fn conversation_list(app: &App, wide: bool, focused: bool) -> List<'static> {
             ),
         ]))]
     } else {
-        app.conversations
-            .iter()
-            .enumerate()
-            .map(|(index, chat)| {
-                let selected = index == app.selected;
-                ListItem::new(Text::from(vec![
-                    Line::from(vec![
-                        Span::styled(
-                            if selected { "› " } else { "  " },
-                            if selected {
-                                Style::default().fg(ACCENT)
-                            } else {
-                                primary()
-                            },
-                        ),
-                        Span::styled(
-                            chat.title.clone(),
-                            if selected {
-                                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-                            } else {
-                                primary().add_modifier(Modifier::BOLD)
-                            },
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(chat.subtitle.clone(), muted()),
-                    ]),
-                    Line::raw(""),
-                ]))
-            })
-            .collect()
+        let indices = app.filtered_conversation_indices();
+        if indices.is_empty() {
+            vec![ListItem::new(Text::from(vec![
+                Line::from(format!("No chats match {:?}", app.search)),
+                Line::styled("Press Esc to clear the search.", muted()),
+            ]))]
+        } else {
+            indices
+                .into_iter()
+                .map(|index| {
+                    let chat = &app.conversations[index];
+                    let selected = index == app.selected;
+                    ListItem::new(Text::from(vec![
+                        Line::from(vec![
+                            Span::styled(
+                                if selected { "› " } else { "  " },
+                                if selected {
+                                    Style::default().fg(ACCENT)
+                                } else {
+                                    primary()
+                                },
+                            ),
+                            Span::styled(
+                                chat.title.clone(),
+                                if selected {
+                                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+                                } else {
+                                    primary().add_modifier(Modifier::BOLD)
+                                },
+                            ),
+                        ]),
+                        Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(chat.subtitle.clone(), muted()),
+                        ]),
+                        Line::raw(""),
+                    ]))
+                })
+                .collect()
+        }
     };
     let borders = if wide {
         Borders::TOP | Borders::RIGHT
@@ -294,6 +303,63 @@ fn conversation_list(app: &App, wide: bool, focused: bool) -> List<'static> {
             .border_style(border_style)
             .padding(Padding::horizontal(if wide { 1 } else { 2 })),
     )
+}
+
+fn render_search(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect, focused: bool) {
+    let border_style = if focused {
+        Style::default().fg(ACCENT)
+    } else {
+        muted()
+    };
+    let available = usize::from(area.width.saturating_sub(4));
+    let before_cursor = &app.search[..app.search_cursor];
+    let mut start = app.search_cursor;
+    let mut width = 0;
+    for (index, character) in before_cursor.char_indices().rev() {
+        let character_width = character.width().unwrap_or(0);
+        if width + character_width > available {
+            break;
+        }
+        width += character_width;
+        start = index;
+    }
+    let line = if app.search.is_empty() {
+        Line::styled("Search chats…", muted())
+    } else {
+        Line::raw(app.search[start..].to_string())
+    };
+    frame.render_widget(
+        Paragraph::new(line).block(
+            Block::default()
+                .title(" Search ")
+                .borders(Borders::ALL)
+                .border_style(border_style)
+                .padding(Padding::horizontal(1)),
+        ),
+        area,
+    );
+    if focused {
+        frame.set_cursor_position((
+            (area.x + 2 + width as u16).min(area.right().saturating_sub(2)),
+            area.y + 1,
+        ));
+    }
+}
+
+fn render_conversation_list(
+    frame: &mut ratatui::Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    wide: bool,
+    focused: bool,
+) {
+    let list = conversation_list(app, wide, focused);
+    let selected = app.filtered_selection();
+    let mut state = ListState::default()
+        .with_offset(app.sidebar_offset)
+        .with_selected(selected);
+    frame.render_stateful_widget(list, area, &mut state);
+    app.sidebar_offset = state.offset();
 }
 
 enum MessageElement {
@@ -608,16 +674,25 @@ fn render_composer(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect, focuse
 
 fn conversation_footer(app: &App) -> Line<'_> {
     let mut spans = vec![
+        Span::styled("type", primary()),
+        Span::styled(" search   ", muted()),
         Span::styled("↑↓", primary()),
         Span::styled(" move   ", muted()),
         Span::styled("enter", primary()),
         Span::styled(" open   ", muted()),
-        Span::styled("r", primary()),
+        Span::styled("ctrl-r", primary()),
         Span::styled(" refresh   ", muted()),
-        Span::styled("d", primary()),
+        Span::styled("ctrl-d", primary()),
         Span::styled(" Disconnect   ", muted()),
         Span::styled("esc", primary()),
-        Span::styled(" quit   ", muted()),
+        Span::styled(
+            if app.search.is_empty() {
+                " quit   "
+            } else {
+                " clear   "
+            },
+            muted(),
+        ),
     ];
     spans.extend(status_spans(&app.status));
     Line::from(spans)
@@ -645,10 +720,15 @@ fn render_footer(frame: &mut ratatui::Frame<'_>, line: Line<'_>, area: Rect) {
     );
 }
 
-fn draw_narrow_conversations(frame: &mut ratatui::Frame<'_>, app: &App) {
+fn draw_narrow_conversations(frame: &mut ratatui::Frame<'_>, app: &mut App) {
     let (header, body, footer) = shell(frame.area());
+    let [search, chats] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .areas(body);
     render_logo(frame, header);
-    frame.render_widget(conversation_list(app, false, true), body);
+    render_search(frame, app, search, true);
+    render_conversation_list(frame, app, chats, false, true);
     render_footer(frame, conversation_footer(app), footer);
 }
 
@@ -677,7 +757,7 @@ fn draw_narrow_chat(
 
 fn draw_wide(
     frame: &mut ratatui::Frame<'_>,
-    app: &App,
+    app: &mut App,
     picker: Option<Picker>,
     images: &mut HashMap<String, AsyncImage>,
     redraw: &tokio::sync::mpsc::UnboundedSender<()>,
@@ -686,6 +766,10 @@ fn draw_wide(
     let (header, body, footer) = shell(frame.area());
     let (sidebar_header, chat_header) = wide_columns(header);
     let (sidebar, chat) = wide_columns(body);
+    let [search, chats] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1)])
+        .areas(sidebar);
     let [messages, input] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(3), Constraint::Length(4)])
@@ -693,10 +777,9 @@ fn draw_wide(
 
     render_logo(frame, sidebar_header);
     render_chat_header(frame, app, chat_header, false);
-    frame.render_widget(
-        conversation_list(app, true, app.screen == Screen::Conversations),
-        sidebar,
-    );
+    let sidebar_focused = app.screen == Screen::Conversations;
+    render_search(frame, app, search, sidebar_focused);
+    render_conversation_list(frame, app, chats, true, sidebar_focused);
     render_messages(frame, app, messages, picker, images, redraw, visible_images);
     render_composer(frame, app, input, app.screen == Screen::Chat);
     let footer_line = if app.screen == Screen::Conversations {
@@ -778,8 +861,11 @@ mod tests {
     use crate::backend::ChatAttachment;
     use presage::libsignal_service::proto::AttachmentPointer;
     use ratatui::{
+        buffer::Buffer,
         layout::Rect,
         style::{Color, Modifier},
+        text::{Line, Text},
+        widgets::{List, ListItem, ListState, StatefulWidget},
     };
 
     #[test]
@@ -851,5 +937,27 @@ mod tests {
         let picker = ratatui_image::picker::Picker::from_fontsize((10, 20));
         assert_eq!(image_height(&attachment, 80, picker), 8);
         assert!(image_height(&attachment, 20, picker) <= 12);
+    }
+
+    #[test]
+    fn stateful_chat_list_scrolls_to_the_last_selected_item() {
+        let items = (0..10)
+            .map(|index| {
+                ListItem::new(Text::from(vec![
+                    Line::raw(format!("Chat {index}")),
+                    Line::raw("subtitle"),
+                    Line::raw(""),
+                ]))
+            })
+            .collect::<Vec<_>>();
+        let list = List::new(items);
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buffer = Buffer::empty(area);
+        let mut state = ListState::default().with_selected(Some(9));
+
+        StatefulWidget::render(list, area, &mut buffer, &mut state);
+
+        assert_eq!(state.selected(), Some(9));
+        assert_eq!(state.offset(), 8);
     }
 }

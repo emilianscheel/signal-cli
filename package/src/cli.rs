@@ -252,6 +252,20 @@ fn message_json(message: &ChatMessage) -> Value {
     })
 }
 
+fn brief_message_name(chat: &Conversation, message: &ChatMessage) -> String {
+    if message.mine {
+        format!("you → {}", chat.title)
+    } else if matches!(chat.id, backend::ConversationId::Group(_)) {
+        format!(
+            "{} · {}",
+            chat.title,
+            message.sender.as_deref().unwrap_or("Unknown contact")
+        )
+    } else {
+        chat.title.clone()
+    }
+}
+
 fn human_size(size: Option<u32>) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let Some(size) = size else {
@@ -567,17 +581,7 @@ pub async fn run(
             } else {
                 let rows = messages
                     .iter()
-                    .map(|(chat, message)| {
-                        let sender = message.sender.as_deref().unwrap_or("unknown");
-                        let name = if message.mine {
-                            format!("you → {}", chat.title)
-                        } else if chat.id.kind() == "group" {
-                            format!("{} · {sender}", chat.title)
-                        } else {
-                            sender.to_string()
-                        };
-                        message_row(message, name)
-                    })
+                    .map(|(chat, message)| message_row(message, brief_message_name(chat, message)))
                     .collect::<Vec<_>>();
                 print!("{}", render_message_rows(&rows, color_enabled()));
             }
@@ -637,8 +641,8 @@ mod tests {
     };
 
     use super::{
-        message_json, parse_date, parse_time_range, positive_usize, render_message_rows,
-        resolve_attachment, HumanMessageRow, ParsedDate,
+        brief_message_name, message_json, parse_date, parse_time_range, positive_usize,
+        render_message_rows, resolve_attachment, HumanMessageRow, ParsedDate,
     };
 
     fn now() -> chrono::DateTime<Local> {
@@ -782,6 +786,56 @@ mod tests {
                 "                       zweite Zeile\n"
             )
         );
+    }
+
+    #[test]
+    fn brief_uses_human_chat_and_sender_names() {
+        let direct = Conversation {
+            id: ConversationId::Contact(
+                presage::libsignal_service::protocol::ServiceId::parse_from_service_id_string(
+                    "0b9240d8-ae86-42dd-bb03-df2805b010b7",
+                )
+                .unwrap(),
+            ),
+            title: "Vera Scheel".into(),
+            subtitle: String::new(),
+            group_revision: None,
+        };
+        let group = Conversation {
+            id: ConversationId::Group([3; 32]),
+            title: "Weekend plans".into(),
+            subtitle: String::new(),
+            group_revision: Some(1),
+        };
+        let incoming = ChatMessage {
+            timestamp: 1,
+            mine: false,
+            sender: Some("Birgit Mallmann".into()),
+            body: "Hello".into(),
+            kind: MessageKind::Text,
+            attachments: Vec::new(),
+        };
+        assert_eq!(brief_message_name(&direct, &incoming), "Vera Scheel");
+        assert_eq!(
+            brief_message_name(&group, &incoming),
+            "Weekend plans · Birgit Mallmann"
+        );
+
+        let unknown = ChatMessage {
+            sender: None,
+            ..incoming.clone()
+        };
+        assert_eq!(
+            brief_message_name(&group, &unknown),
+            "Weekend plans · Unknown contact"
+        );
+
+        let sent = ChatMessage {
+            mine: true,
+            sender: None,
+            ..incoming
+        };
+        assert_eq!(brief_message_name(&direct, &sent), "you → Vera Scheel");
     }
 
     #[test]

@@ -30,6 +30,37 @@ pub enum LayoutMode {
     Wide,
 }
 
+fn matching_conversation_indices(conversations: &[Conversation], query: &str) -> Vec<usize> {
+    let query = query.to_lowercase();
+    conversations
+        .iter()
+        .enumerate()
+        .filter(|(_, conversation)| {
+            query.is_empty()
+                || conversation.title.to_lowercase().contains(&query)
+                || conversation.subtitle.to_lowercase().contains(&query)
+        })
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn reconciled_selection(indices: &[usize], selected: usize) -> Option<usize> {
+    indices
+        .contains(&selected)
+        .then_some(selected)
+        .or_else(|| indices.first().copied())
+}
+
+fn moved_selection(indices: &[usize], selected: usize, down: bool) -> Option<usize> {
+    let current = indices.iter().position(|index| *index == selected)?;
+    let next = if down {
+        (current + 1).min(indices.len().saturating_sub(1))
+    } else {
+        current.saturating_sub(1)
+    };
+    indices.get(next).copied()
+}
+
 impl LayoutMode {
     pub const fn for_width(width: u16) -> Self {
         if width >= WIDE_BREAKPOINT {
@@ -64,6 +95,9 @@ pub struct App {
     manager: Manager<SqliteStore, Registered>,
     pub conversations: Vec<Conversation>,
     pub selected: usize,
+    pub search: String,
+    pub search_cursor: usize,
+    pub sidebar_offset: usize,
     opened: Option<backend::ConversationId>,
     pub messages: Vec<ChatMessage>,
     pub input: String,
@@ -91,6 +125,9 @@ impl App {
             manager,
             conversations: Vec::new(),
             selected: 0,
+            search: String::new(),
+            search_cursor: 0,
+            sidebar_offset: 0,
             opened: None,
             messages: Vec::new(),
             input: String::new(),
@@ -126,7 +163,78 @@ impl App {
     }
 
     pub fn selected_conversation(&self) -> Option<&Conversation> {
-        self.conversations.get(self.selected)
+        self.filtered_conversation_indices()
+            .contains(&self.selected)
+            .then(|| self.conversations.get(self.selected))
+            .flatten()
+    }
+
+    pub fn filtered_conversation_indices(&self) -> Vec<usize> {
+        matching_conversation_indices(&self.conversations, &self.search)
+    }
+
+    pub fn filtered_selection(&self) -> Option<usize> {
+        self.filtered_conversation_indices()
+            .iter()
+            .position(|index| *index == self.selected)
+    }
+
+    fn reconcile_search_selection(&mut self) {
+        let indices = self.filtered_conversation_indices();
+        if let Some(selected) = reconciled_selection(&indices, self.selected) {
+            if selected != self.selected {
+                self.selected = selected;
+                self.sidebar_offset = 0;
+            }
+        } else {
+            self.sidebar_offset = 0;
+        }
+    }
+
+    fn move_sidebar_selection(&mut self, down: bool) {
+        let indices = self.filtered_conversation_indices();
+        let Some(next) = moved_selection(&indices, self.selected, down) else {
+            if let Some(first) = indices.first() {
+                self.selected = *first;
+                self.sidebar_offset = 0;
+            }
+            return;
+        };
+        self.selected = next;
+    }
+
+    fn insert_search_char(&mut self, character: char) {
+        self.search.insert(self.search_cursor, character);
+        self.search_cursor += character.len_utf8();
+        self.reconcile_search_selection();
+    }
+
+    fn remove_search_char_before_cursor(&mut self) {
+        if self.search_cursor == 0 {
+            return;
+        }
+        let previous = self.search[..self.search_cursor]
+            .char_indices()
+            .next_back()
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.search.drain(previous..self.search_cursor);
+        self.search_cursor = previous;
+        self.reconcile_search_selection();
+    }
+
+    fn remove_search_char_at_cursor(&mut self) {
+        if self.search_cursor >= self.search.len() {
+            return;
+        }
+        let next = self.search[self.search_cursor..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(0);
+        self.search
+            .drain(self.search_cursor..self.search_cursor + next);
+        self.reconcile_search_selection();
     }
 
     pub fn opened_conversation(&self) -> Option<&Conversation> {
@@ -141,7 +249,7 @@ impl App {
     }
 
     async fn refresh_conversations(&mut self) -> Result<()> {
-        let selected = self.selected_conversation().map(|c| c.id.clone());
+        let selected = self.conversations.get(self.selected).map(|c| c.id.clone());
         let opened = self.opened.clone();
         self.conversations = backend::conversations(&self.manager).await?;
         if let Some(id) = selected {
@@ -155,6 +263,7 @@ impl App {
                 .selected
                 .min(self.conversations.len().saturating_sub(1));
         }
+        self.reconcile_search_selection();
         self.opened = opened.filter(|id| {
             self.conversations
                 .iter()
@@ -255,18 +364,47 @@ impl App {
         }
         match self.screen {
             Screen::Conversations => match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
-                KeyCode::Up | KeyCode::Char('k') => self.selected = self.selected.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => {
-                    self.selected =
-                        (self.selected + 1).min(self.conversations.len().saturating_sub(1));
+                KeyCode::Esc if !self.search.is_empty() => {
+                    self.search.clear();
+                    self.search_cursor = 0;
+                    self.reconcile_search_selection();
                 }
+                KeyCode::Esc => return Ok(true),
+                KeyCode::Up => self.move_sidebar_selection(false),
+                KeyCode::Down => self.move_sidebar_selection(true),
                 KeyCode::Enter => self.load_selected(true).await?,
-                KeyCode::Char('r') => {
+                KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     self.refresh_conversations().await?;
                     self.ensure_wide_chat().await?;
                 }
-                KeyCode::Char('d') => self.screen = Screen::DisconnectConfirm,
+                KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.screen = Screen::DisconnectConfirm
+                }
+                KeyCode::Char(character)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.insert_search_char(character)
+                }
+                KeyCode::Backspace => self.remove_search_char_before_cursor(),
+                KeyCode::Delete => self.remove_search_char_at_cursor(),
+                KeyCode::Left => {
+                    self.search_cursor = self.search[..self.search_cursor]
+                        .char_indices()
+                        .next_back()
+                        .map(|(index, _)| index)
+                        .unwrap_or(0)
+                }
+                KeyCode::Right if self.search_cursor < self.search.len() => {
+                    self.search_cursor += self.search[self.search_cursor..]
+                        .chars()
+                        .next()
+                        .map(char::len_utf8)
+                        .unwrap_or(0);
+                }
+                KeyCode::Home => self.search_cursor = 0,
+                KeyCode::End => self.search_cursor = self.search.len(),
                 _ => {}
             },
             Screen::Chat => match key.code {
@@ -436,7 +574,10 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::{remembered_selection, LayoutMode, Screen, WIDE_BREAKPOINT};
+    use super::{
+        matching_conversation_indices, moved_selection, reconciled_selection, remembered_selection,
+        LayoutMode, Screen, WIDE_BREAKPOINT,
+    };
     use crate::backend::{Conversation, ConversationId};
 
     #[test]
@@ -478,5 +619,52 @@ mod tests {
             0
         );
         assert_eq!(remembered_selection(&conversations, None), 0);
+    }
+
+    #[test]
+    fn search_matches_names_and_subtitles_case_insensitively() {
+        let conversations = vec![
+            Conversation {
+                id: ConversationId::Group([1; 32]),
+                title: "Family Plans".into(),
+                subtitle: "4 members".into(),
+                group_revision: Some(1),
+            },
+            Conversation {
+                id: ConversationId::Group([2; 32]),
+                title: "Vera Scheel".into(),
+                subtitle: "+49 152 123456".into(),
+                group_revision: Some(1),
+            },
+        ];
+
+        assert_eq!(
+            matching_conversation_indices(&conversations, "fAmIlY"),
+            vec![0]
+        );
+        assert_eq!(
+            matching_conversation_indices(&conversations, "152"),
+            vec![1]
+        );
+        assert_eq!(
+            matching_conversation_indices(&conversations, "missing"),
+            Vec::<usize>::new()
+        );
+        assert_eq!(
+            matching_conversation_indices(&conversations, ""),
+            vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn filtered_selection_is_preserved_or_moves_to_the_first_match() {
+        let matches = vec![1, 3, 5];
+        assert_eq!(reconciled_selection(&matches, 3), Some(3));
+        assert_eq!(reconciled_selection(&matches, 2), Some(1));
+        assert_eq!(reconciled_selection(&[], 2), None);
+        assert_eq!(moved_selection(&matches, 1, true), Some(3));
+        assert_eq!(moved_selection(&matches, 5, true), Some(5));
+        assert_eq!(moved_selection(&matches, 3, false), Some(1));
+        assert_eq!(moved_selection(&matches, 1, false), Some(1));
     }
 }

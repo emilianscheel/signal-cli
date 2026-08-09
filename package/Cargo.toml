@@ -1,8 +1,8 @@
 [package]
 name = "signal-tui"
-version = "0.3.3"
+version = "0.3.4"
 edition = "2021"
-license = "AGPL-3.0-only"
+license = "MIT"
 description = "A fast, keyboard-first Signal client for the terminal"
 repository = "https://github.com/emilianscheel/signal-cli"
 
