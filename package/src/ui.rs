@@ -9,7 +9,10 @@ use anyhow::Result;
 use chrono::{Local, TimeZone};
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -92,7 +95,9 @@ impl TerminalSession {
     pub fn start() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        // Purge the primary buffer before switching screens so terminal
+        // emulators cannot reveal pre-TUI output when the user scrolls back.
+        execute!(stdout, Clear(ClearType::Purge), EnterAlternateScreen)?;
         let picker = Picker::from_query_stdio()
             .ok()
             .filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks);
