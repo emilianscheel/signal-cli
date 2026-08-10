@@ -144,6 +144,13 @@ edits, polls, calls, and stories are shown with concise placeholders.
 3. Scan the QR code shown in the terminal.
 4. Wait for contacts and groups to synchronize, then select a chat with `Enter`.
 
+Signal only offers complete text-history transfer while a device is first
+linked. A captured transfer is authenticated, validated, and imported before
+the interactive interface starts; partial private archives are resumed on the
+next launch. Accounts linked before a transfer was captured must be disconnected
+and linked again. Later synchronization only asks the phone for contacts and
+drains messages still queued by Signal.
+
 The database is stored in the operating system's local data directory. Use
 `signal --data /path/to/signal.db` to choose a different location.
 
@@ -163,10 +170,11 @@ bytes.
 | Chats    | `Enter`             | Open the selected conversation          |
 | Chats    | `Esc`               | Clear search, or quit when already empty |
 | Chats    | `Ctrl-R`            | Reload synced contacts and groups       |
-| Chats    | `Ctrl-D`, then `y`  | Erase local account data and disconnect |
+| Chats    | `Ctrl-D`, then `Ctrl-Y` | Erase local account data and disconnect |
 | Chat     | `Enter`             | Send the current message                |
 | Chat     | `PageUp`/`PageDown` | Scroll message history                  |
 | Chat     | `Esc`               | Return to the chat list                 |
+| Chats/Chat | `Ctrl-S`          | Refresh contacts and queued messages    |
 | Anywhere | `Ctrl-C`            | Quit safely                             |
 
 At widths of 120 columns or more, chats remain visible in a fixed 32-column

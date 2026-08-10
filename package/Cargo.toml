@@ -19,8 +19,10 @@ directories = "6.0"
 futures = "0.3"
 hex = "0.4"
 image = { version = "0.25", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
-presage = { git = "https://github.com/whisperfish/presage", rev = "1369a7e43d60df066dfd5b89ee2d1f355ef86c13" }
-presage-store-sqlite = { git = "https://github.com/whisperfish/presage", rev = "1369a7e43d60df066dfd5b89ee2d1f355ef86c13" }
+libsignal-message-backup = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.4", features = ["json"] }
+presage = { git = "https://github.com/emilianscheel/presage", rev = "17a96cb49fb0b9c7acd52fd3125d329224502305" }
+presage-store-sqlite = { git = "https://github.com/emilianscheel/presage", rev = "17a96cb49fb0b9c7acd52fd3125d329224502305" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 qrcode = { version = "0.14", default-features = false }
 ratatui = "0.29"
 ratatui-image = { version = "5.0", default-features = false, features = ["crossterm"] }
@@ -30,6 +32,7 @@ tokio = { version = "1.48", features = ["macros", "rt-multi-thread", "sync", "ti
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 unicode-width = "0.2"
+url = "2.5"
 
 [dev-dependencies]
 tempfile = "3.20"

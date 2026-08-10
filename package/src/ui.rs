@@ -680,6 +680,8 @@ fn conversation_footer(app: &App) -> Line<'_> {
         Span::styled(" move   ", muted()),
         Span::styled("enter", primary()),
         Span::styled(" open   ", muted()),
+        Span::styled("ctrl-s", primary()),
+        Span::styled(" sync   ", muted()),
         Span::styled("ctrl-r", primary()),
         Span::styled(" refresh   ", muted()),
         Span::styled("ctrl-d", primary()),
@@ -706,6 +708,8 @@ fn chat_footer(app: &App, wide: bool) -> Line<'_> {
         Span::styled(if wide { " sidebar   " } else { " chats   " }, muted()),
         Span::styled("pgup/dn", primary()),
         Span::styled(" scroll   ", muted()),
+        Span::styled("ctrl-s", primary()),
+        Span::styled(" sync   ", muted()),
         Span::styled("ctrl-c", primary()),
         Span::styled(" quit   ", muted()),
     ];
@@ -822,9 +826,9 @@ fn draw_disconnect_confirm(frame: &mut ratatui::Frame<'_>) {
     render_footer(
         frame,
         Line::from(vec![
-            Span::styled("y", Style::default().fg(Color::Red)),
+            Span::styled("ctrl-y", Style::default().fg(Color::Red)),
             Span::styled(" Disconnect and erase local data   ", muted()),
-            Span::styled("esc/n", primary()),
+            Span::styled("esc/ctrl-n", primary()),
             Span::styled(" Cancel", muted()),
         ]),
         footer,
