@@ -162,20 +162,20 @@ bytes.
 
 ## Keys
 
-| Screen   | Key                 | Action                                  |
-| -------- | ------------------- | --------------------------------------- |
-| Chats    | Type text           | Filter chats by name or subtitle        |
-| Chats    | `Backspace`/`Delete` | Edit the chat search                    |
-| Chats    | `↑`/`↓`             | Select a matching conversation          |
-| Chats    | `Enter`             | Open the selected conversation          |
-| Chats    | `Esc`               | Clear search, or quit when already empty |
-| Chats    | `Ctrl-R`            | Reload synced contacts and groups       |
-| Chats    | `Ctrl-D`, then `Ctrl-Y` | Erase local account data and disconnect |
-| Chat     | `Enter`             | Send the current message                |
-| Chat     | `PageUp`/`PageDown` | Scroll message history                  |
-| Chat     | `Esc`               | Return to the chat list                 |
-| Chats/Chat | `Ctrl-S`          | Refresh contacts and queued messages    |
-| Anywhere | `Ctrl-C`            | Quit safely                             |
+| Screen     | Key                     | Action                                   |
+| ---------- | ----------------------- | ---------------------------------------- |
+| Chats      | Type text               | Filter chats by name or subtitle         |
+| Chats      | `Backspace`/`Delete`    | Edit the chat search                     |
+| Chats      | `↑`/`↓`                 | Select a matching conversation           |
+| Chats      | `Enter`                 | Open the selected conversation           |
+| Chats      | `Esc`                   | Clear search, or quit when already empty |
+| Chats      | `Ctrl-R`                | Reload synced contacts and groups        |
+| Chats      | `Ctrl-D`, then `Ctrl-Y` | Erase local account data and disconnect  |
+| Chat       | `Enter`                 | Send the current message                 |
+| Chat       | `PageUp`/`PageDown`     | Scroll message history                   |
+| Chat       | `Esc`                   | Return to the chat list                  |
+| Chats/Chat | `Ctrl-S`                | Refresh contacts and queued messages     |
+| Anywhere   | `Ctrl-C`                | Quit safely                              |
 
 At widths of 120 columns or more, chats remain visible in a fixed 32-column
 sidebar. Press `Esc` to focus the sidebar, type to filter chats, move with the
@@ -219,5 +219,5 @@ AGPL-3.0-only.
 ## Release
 
 ```sh
-git tag -a v0.3.3 -m "v0.3.3" && git push origin main v0.3.3
+git tag -a v0.3.5 -m "v0.3.5" && git push origin main v0.3.5
 ```
