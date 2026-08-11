@@ -42,7 +42,7 @@ jobs:
 
           package_version=$(cargo metadata \
             --manifest-path package/Cargo.toml \
-            --no-deps \
+            --locked \
             --format-version 1 \
             | jq -r '.packages[] | select(.name == "signal-tui") | .version')
 
