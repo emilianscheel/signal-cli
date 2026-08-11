@@ -53,6 +53,35 @@ For development:
 cargo run --manifest-path package/Cargo.toml --release
 ```
 
+## Uninstall or switch installs
+
+Remove the local Cargo-installed development binary:
+
+```sh
+cargo uninstall signal-tui
+```
+
+Remove the production binary:
+
+```sh
+sudo rm -f /usr/local/bin/signal && rm -rf "$HOME/.local/lib/signal-cli"
+```
+
+Switch from development to production:
+
+```sh
+cargo uninstall signal-tui && curl -fsSL https://signal-cli.vercel.app/install.sh | sh
+```
+
+Switch from production to development, from the repository root:
+
+```sh
+sudo rm -f /usr/local/bin/signal && rm -rf "$HOME/.local/lib/signal-cli" && cargo install --path package --locked
+```
+
+These commands remove only the executables. Linked-device credentials and
+message data are preserved, so switching does not require relinking Signal.
+
 ## One-shot commands
 
 Running `signal` without a command opens the interactive interface. The same
