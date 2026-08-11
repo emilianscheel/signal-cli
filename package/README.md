@@ -248,5 +248,5 @@ AGPL-3.0-only.
 ## Release
 
 ```sh
-cargo metadata --manifest-path package/Cargo.toml --locked --format-version 1 >/dev/null && git tag -a v0.3.6 -m "v0.3.6" && git push origin main v0.3.6
+./release.sh
 ```
