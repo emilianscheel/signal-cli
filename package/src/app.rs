@@ -21,6 +21,7 @@ use crate::{
     preferences::PreferencesStore,
     sync::{self, LinkSyncPaths, SyncReport},
     ui::TerminalSession,
+    updater::UpdateMonitor,
 };
 
 pub const WIDE_BREAKPOINT: u16 = 120;
@@ -118,6 +119,8 @@ pub struct App {
     attachment_cache: AttachmentCache,
     pub attachment_states: HashMap<String, AttachmentState>,
     attachment_slots: Arc<tokio::sync::Semaphore>,
+    pub update_notice: Option<String>,
+    update_monitor: Option<UpdateMonitor>,
 }
 
 impl App {
@@ -126,6 +129,8 @@ impl App {
         preferences: PreferencesStore,
         attachment_cache_path: PathBuf,
         link_sync_paths: LinkSyncPaths,
+        update_notice: Option<String>,
+        update_monitor: Option<UpdateMonitor>,
     ) -> Self {
         Self {
             manager,
@@ -153,6 +158,8 @@ impl App {
             attachment_cache: AttachmentCache::new(attachment_cache_path),
             attachment_states: HashMap::new(),
             attachment_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            update_notice,
+            update_monitor,
         }
     }
 
@@ -636,6 +643,18 @@ impl App {
         let mut terminal = TerminalSession::start()?;
         let mut events = EventStream::new();
         let (attachment_tx, mut attachment_rx) = mpsc::unbounded_channel();
+        let (update_tx, mut update_rx) = mpsc::unbounded_channel();
+        if let Some(monitor) = self.update_monitor.take() {
+            tokio::task::spawn_local(async move {
+                if let Some(notice) = monitor.wait().await {
+                    let _ = update_tx.send(notice);
+                }
+            });
+        }
+        let mut update_notice_deadline = self
+            .update_notice
+            .as_ref()
+            .map(|_| tokio::time::Instant::now() + std::time::Duration::from_secs(8));
 
         loop {
             let visible_images = terminal.draw(&mut self)?;
@@ -656,6 +675,19 @@ impl App {
                 Some(event) = network_rx.recv() => self.handle_network(event).await?,
                 Some(event) = attachment_rx.recv() => self.handle_attachment(event),
                 Some(result) = sync_rx.recv() => self.finish_pending_sync(result).await,
+                Some(notice) = update_rx.recv() => {
+                    self.update_notice = Some(notice);
+                    update_notice_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(8));
+                },
+                _ = async {
+                    match update_notice_deadline {
+                        Some(deadline) => tokio::time::sleep_until(deadline).await,
+                        None => futures::future::pending().await,
+                    }
+                }, if update_notice_deadline.is_some() => {
+                    self.update_notice = None;
+                    update_notice_deadline = None;
+                },
                 _ = terminal.redraw_requested(), if terminal.supports_images() => {},
             }
         }

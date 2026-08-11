@@ -702,6 +702,9 @@ fn conversation_footer(app: &App) -> Line<'_> {
         ),
     ];
     spans.extend(status_spans(&app.status));
+    if let Some(notice) = &app.update_notice {
+        spans.push(Span::styled(format!("   {notice}"), muted()));
+    }
     Line::from(spans)
 }
 
@@ -719,6 +722,9 @@ fn chat_footer(app: &App, wide: bool) -> Line<'_> {
         Span::styled(" quit   ", muted()),
     ];
     spans.extend(status_spans(&app.status));
+    if let Some(notice) = &app.update_notice {
+        spans.push(Span::styled(format!("   {notice}"), muted()));
+    }
     Line::from(spans)
 }
 

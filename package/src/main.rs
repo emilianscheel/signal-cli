@@ -5,6 +5,7 @@ mod cli;
 mod preferences;
 mod sync;
 mod ui;
+mod updater;
 
 use std::{path::PathBuf, process::ExitCode};
 
@@ -130,6 +131,10 @@ struct Args {
     #[arg(long, global = true)]
     json: bool,
 
+    /// Run the managed-install update helper.
+    #[arg(long, hide = true)]
+    internal_update: bool,
+
     #[command(subcommand)]
     command: Option<cli::Command>,
 }
@@ -160,7 +165,11 @@ fn init_logging(verbose: bool) {
         .init();
 }
 
-async fn run(args: Args) -> Result<()> {
+async fn run(
+    args: Args,
+    update_notice: Option<String>,
+    update_monitor: Option<updater::UpdateMonitor>,
+) -> Result<()> {
     init_logging(args.verbose);
 
     let command_mode = args.command.is_some();
@@ -246,6 +255,8 @@ async fn run(args: Args) -> Result<()> {
                     PreferencesStore::new(app_preferences_path),
                     app_attachment_cache_path,
                     app_link_sync_paths,
+                    update_notice,
+                    update_monitor,
                 )
                 .run()
                 .await
@@ -263,8 +274,26 @@ async fn run(args: Args) -> Result<()> {
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     let args = Args::parse();
+    if args.internal_update {
+        return if updater::run_helper().await.is_ok() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        };
+    }
     let json_output = args.json;
-    match run(args).await {
+    let update_notice = if json_output {
+        None
+    } else {
+        updater::take_success_notice()
+    };
+    if args.command.is_some() {
+        if let Some(notice) = &update_notice {
+            eprintln!("{notice}");
+        }
+    }
+    let update_monitor = updater::spawn_helper();
+    match run(args, update_notice, update_monitor).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             if json_output {
@@ -378,6 +407,13 @@ mod tests {
     #[test]
     fn bare_signal_still_selects_the_tui() {
         assert!(Args::try_parse_from(["signal"]).unwrap().command.is_none());
+    }
+
+    #[test]
+    fn internal_updater_mode_is_parseable_without_a_command() {
+        let args = Args::try_parse_from(["signal", "--internal-update"]).unwrap();
+        assert!(args.internal_update);
+        assert!(args.command.is_none());
     }
 
     #[test]

@@ -130,7 +130,66 @@ jobs:
 
       - name: Generate checksums
         working-directory: dist
-        run: sha256sum signal-* > SHA256SUMS
+        shell: bash
+        run: |
+          sha256sum signal-* > SHA256SUMS
+
+          version="${GITHUB_REF_NAME#v}"
+          checksum() {
+            local asset="$1"
+            local value
+            value=$(awk -v asset="$asset" '$2 == asset { print $1 }' SHA256SUMS)
+            if [[ -z "$value" ]]; then
+              echo "Missing checksum for $asset" >&2
+              exit 1
+            fi
+            printf '%s' "$value"
+          }
+
+          jq -n \
+            --arg version "$version" \
+            --arg x86_64_apple "$(checksum signal-x86_64-apple-darwin)" \
+            --arg aarch64_apple "$(checksum signal-aarch64-apple-darwin)" \
+            --arg x86_64_linux "$(checksum signal-x86_64-unknown-linux-gnu)" \
+            --arg aarch64_linux "$(checksum signal-aarch64-unknown-linux-gnu)" \
+            '{
+              schema: 1,
+              version: $version,
+              artifacts: {
+                "x86_64-apple-darwin": {
+                  name: "signal-x86_64-apple-darwin",
+                  sha256: $x86_64_apple
+                },
+                "aarch64-apple-darwin": {
+                  name: "signal-aarch64-apple-darwin",
+                  sha256: $aarch64_apple
+                },
+                "x86_64-unknown-linux-gnu": {
+                  name: "signal-x86_64-unknown-linux-gnu",
+                  sha256: $x86_64_linux
+                },
+                "aarch64-unknown-linux-gnu": {
+                  name: "signal-aarch64-unknown-linux-gnu",
+                  sha256: $aarch64_linux
+                }
+              }
+            }' > release.json
+
+      - name: Verify release manifest
+        working-directory: dist
+        shell: bash
+        run: |
+          test "$(jq -r '.schema' release.json)" = "1"
+          test "$(jq -r '.version' release.json)" = "${GITHUB_REF_NAME#v}"
+          for asset in signal-*; do
+            target="${asset#signal-}"
+            manifest_name=$(jq -r --arg target "$target" '.artifacts[$target].name // empty' release.json)
+            manifest_checksum=$(jq -r --arg target "$target" '.artifacts[$target].sha256 // empty' release.json)
+            actual_checksum=$(sha256sum "$asset" | awk '{ print $1 }')
+            test "$manifest_name" = "$asset"
+            test "$manifest_checksum" = "$actual_checksum"
+          done
+          test "$(jq '.artifacts | length' release.json)" = "4"
 
       - name: Create GitHub release
         env:
@@ -139,6 +198,7 @@ jobs:
           gh release create "${GITHUB_REF_NAME}"
           dist/signal-*
           dist/SHA256SUMS
+          dist/release.json
           --verify-tag
           --generate-notes
           --title "${GITHUB_REF_NAME}"

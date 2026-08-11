@@ -4,7 +4,10 @@ set -eu
 
 repository="emilianscheel/signal-cli"
 install_dir="/usr/local/bin"
+managed_dir="${HOME:?HOME is required}/.local/lib/signal-cli"
 program="signal"
+managed_program="${managed_dir}/${program}"
+managed_marker="${managed_dir}/.signal-managed-install"
 
 fail() {
     printf 'error: %s\n' "$*" >&2
@@ -17,7 +20,9 @@ require_command() {
 
 require_command curl
 require_command install
+require_command ln
 require_command mktemp
+require_command mv
 require_command uname
 require_command awk
 
@@ -62,12 +67,21 @@ else
     fail "required checksum command not found: install sha256sum or shasum"
 fi
 
+install -d -m 0755 "$managed_dir"
+managed_temporary="${managed_dir}/.${program}.install.$$"
+install -m 0755 "${temporary_dir}/${asset}" "$managed_temporary"
+mv -f "$managed_temporary" "$managed_program"
+install -m 0644 /dev/null "$managed_marker"
+
+command_path="${install_dir}/${program}"
+[ ! -d "$command_path" ] || fail "$command_path is a directory"
 if [ -d "$install_dir" ] && [ -w "$install_dir" ]; then
-    install -m 0755 "${temporary_dir}/${asset}" "${install_dir}/${program}"
+    ln -sfn "$managed_program" "$command_path"
 else
     require_command sudo
     sudo install -d -m 0755 "$install_dir"
-    sudo install -m 0755 "${temporary_dir}/${asset}" "${install_dir}/${program}"
+    sudo ln -sfn "$managed_program" "$command_path"
 fi
 
-printf 'Installed %s to %s/%s\n' "$program" "$install_dir" "$program"
+printf 'Installed %s to %s (managed binary: %s)\n' \
+    "$program" "$command_path" "$managed_program"
