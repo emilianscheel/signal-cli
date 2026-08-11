@@ -1,9 +1,9 @@
 use std::{
     ops::Range,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use futures::{channel::oneshot, future, StreamExt};
 use presage::{
     libsignal_service::{
@@ -20,6 +20,8 @@ use presage::{
 use presage_store_sqlite::SqliteStore;
 use qrcode::{Color as QrColor, QrCode};
 use tokio::sync::mpsc;
+
+use crate::sync::{save_link_state, LinkSyncPaths, LinkSyncState};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ConversationId {
@@ -251,10 +253,15 @@ fn transparent_qr(value: &str) -> Result<String> {
     Ok(output)
 }
 
+fn enable_history_transfer(url: &mut url::Url) {
+    url.query_pairs_mut().append_pair("capabilities", "backup5");
+}
+
 pub async fn link_device(
     store: SqliteStore,
     device_name: String,
     stderr: bool,
+    sync_paths: &LinkSyncPaths,
 ) -> Result<Manager<SqliteStore, Registered>> {
     if stderr {
         eprintln!("Welcome to Signal CLI\n");
@@ -266,9 +273,15 @@ pub async fn link_device(
 
     let (tx, rx) = oneshot::channel();
     let (manager, shown) = future::join(
-        Manager::link_secondary_device(store, SignalServers::Production, device_name, tx),
+        Manager::link_secondary_device_with_history(
+            store,
+            SignalServers::Production,
+            device_name,
+            tx,
+        ),
         async move {
-            let url = rx.await.context("Signal provisioning was cancelled")?;
+            let mut url = rx.await.context("Signal provisioning was cancelled")?;
+            enable_history_transfer(&mut url);
             if stderr {
                 eprint!("{}", transparent_qr(url.as_str())?);
             } else {
@@ -279,7 +292,21 @@ pub async fn link_device(
     )
     .await;
     shown?;
-    manager.context("link this terminal as a Signal device")
+    let (manager, ephemeral_backup_key, aci, device_id, password) =
+        manager.context("link this terminal as a Signal device")?;
+    if let Some(ephemeral_backup_key) = ephemeral_backup_key {
+        save_link_state(
+            &sync_paths.state,
+            &LinkSyncState {
+                ephemeral_backup_key: Some(hex::encode(ephemeral_backup_key)),
+                account_aci: Some(aci.service_id_string()),
+                device_id: Some(device_id),
+                password: Some(password),
+                ..Default::default()
+            },
+        )?;
+    }
+    Ok(manager)
 }
 
 pub async fn conversations(
@@ -603,28 +630,6 @@ pub async fn send(
     })
 }
 
-pub async fn sync_pending(
-    manager: &Manager<SqliteStore, Registered>,
-    timeout: Duration,
-) -> Result<()> {
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    let receiver = start_receiver(manager.clone(), tx);
-    let result = tokio::time::timeout(timeout, async {
-        while let Some(event) = rx.recv().await {
-            match event {
-                NetworkEvent::QueueEmpty => return Ok(()),
-                NetworkEvent::Error(error) => bail!(error),
-                NetworkEvent::Message(_) | NetworkEvent::ConversationsChanged => {}
-            }
-        }
-        bail!("Signal receive stream ended before synchronization completed")
-    })
-    .await;
-    receiver.abort();
-    let _ = receiver.await;
-    result.context("timed out waiting for Signal synchronization")?
-}
-
 pub fn start_receiver(
     mut manager: Manager<SqliteStore, Registered>,
     tx: mpsc::UnboundedSender<NetworkEvent>,
@@ -668,8 +673,8 @@ mod tests {
 
     use super::{
         chat_attachments, contact_title, content_attachment_pointers, data_message_body,
-        group_title, matching_conversations, transparent_qr, Conversation, ConversationId,
-        MessageKind,
+        enable_history_transfer, group_title, matching_conversations, transparent_qr, Conversation,
+        ConversationId, MessageKind,
     };
 
     fn valid_pointer(byte: u8) -> AttachmentPointer {
@@ -687,6 +692,15 @@ mod tests {
         let rendered = transparent_qr("sgnl://linkdevice?uuid=test&pub_key=test").unwrap();
         assert!(rendered.contains("██"));
         assert!(!rendered.contains("\u{1b}["));
+    }
+
+    #[test]
+    fn provisioning_qr_advertises_link_history_transfer() {
+        let mut url = url::Url::parse("sgnl://linkdevice?uuid=test&pub_key=test").unwrap();
+        enable_history_transfer(&mut url);
+        assert!(url
+            .query_pairs()
+            .any(|(key, value)| key == "capabilities" && value == "backup5"));
     }
 
     #[test]

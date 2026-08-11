@@ -3,6 +3,7 @@ mod attachments;
 mod backend;
 mod cli;
 mod preferences;
+mod sync;
 mod ui;
 
 use std::{path::PathBuf, process::ExitCode};
@@ -16,6 +17,27 @@ use presage_store_sqlite::SqliteStore;
 use crate::{
     app::App, attachments::AttachmentCache, backend::link_device, preferences::PreferencesStore,
 };
+
+fn link_progress_message(progress: sync::SyncProgress) -> String {
+    match progress {
+        sync::SyncProgress::WaitingForPhone => "Waiting for phone to prepare history".into(),
+        sync::SyncProgress::Downloading {
+            downloaded_bytes,
+            total_bytes,
+        } => match total_bytes {
+            Some(total) if total > 0 => format!(
+                "Downloading history: {downloaded_bytes}/{total} bytes ({}%)",
+                downloaded_bytes.saturating_mul(100) / total
+            ),
+            _ => format!("Downloading history: {downloaded_bytes} bytes"),
+        },
+        sync::SyncProgress::Validating => "Validating history archive".into(),
+        sync::SyncProgress::Importing { imported_messages } => {
+            format!("Importing history: {imported_messages} messages")
+        }
+        sync::SyncProgress::RefreshingPending => "Refreshing contacts and queued messages".into(),
+    }
+}
 
 #[cfg(unix)]
 fn protect_local_data(path: &std::path::Path, protect_parent: bool) -> Result<()> {
@@ -147,6 +169,7 @@ async fn run(args: Args) -> Result<()> {
     let path = data_path(args.data)?;
     let ui_preferences_path = preference_path(&path);
     let attachment_cache_path = attachment_cache_path(&path);
+    let link_sync_paths = sync::LinkSyncPaths::for_database(&path);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("create data directory {}", parent.display()))?;
@@ -164,13 +187,49 @@ async fn run(args: Args) -> Result<()> {
     let local = tokio::task::LocalSet::new();
     let app_preferences_path = ui_preferences_path.clone();
     let app_attachment_cache_path = attachment_cache_path.clone();
+    let app_link_sync_paths = link_sync_paths.clone();
     let disconnected = local
         .run_until(async move {
             let mut manager: Manager<SqliteStore, Registered> =
                 match Manager::load_registered(store.clone()).await {
                     Ok(manager) => manager,
-                    Err(_) => link_device(store, args.device_name, command_mode).await?,
+                    Err(_) => {
+                        link_device(store, args.device_name, command_mode, &app_link_sync_paths)
+                            .await?
+                    }
                 };
+
+            sync::download_link_history(&manager, &app_link_sync_paths, |progress| {
+                let message = link_progress_message(progress);
+                if command_mode {
+                    eprintln!("{message}");
+                } else {
+                    println!("{message}");
+                }
+            })
+            .await?;
+
+            let history_report =
+                sync::import_link_history(&manager, &app_link_sync_paths, |progress| {
+                    let message = link_progress_message(progress);
+                    if command_mode {
+                        eprintln!("{message}");
+                    } else {
+                        println!("{message}");
+                    }
+                })
+                .await?;
+            if history_report.imported_messages > 0 {
+                let message = format!(
+                    "History import complete: {} messages",
+                    history_report.imported_messages
+                );
+                if command_mode {
+                    eprintln!("{message}");
+                } else {
+                    println!("{message}");
+                }
+            }
 
             if let Some(command) = args.command {
                 cli::run(
@@ -186,6 +245,7 @@ async fn run(args: Args) -> Result<()> {
                     manager,
                     PreferencesStore::new(app_preferences_path),
                     app_attachment_cache_path,
+                    app_link_sync_paths,
                 )
                 .run()
                 .await
@@ -195,6 +255,7 @@ async fn run(args: Args) -> Result<()> {
 
     if disconnected {
         remove_local_data(&path, &ui_preferences_path, &attachment_cache_path)?;
+        link_sync_paths.cleanup()?;
     }
     Ok(())
 }

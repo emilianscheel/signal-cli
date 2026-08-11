@@ -18,6 +18,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     attachments::{self, AttachmentCache},
     backend::{self, AttachmentOccurrence, ChatAttachment, ChatMessage, Conversation},
+    sync,
 };
 
 const DEFAULT_LIMIT: usize = 15;
@@ -483,7 +484,7 @@ pub async fn run(
     json_output: bool,
     attachment_cache: AttachmentCache,
 ) -> Result<()> {
-    if let Err(error) = backend::sync_pending(manager, SYNC_TIMEOUT).await {
+    if let Err(error) = sync::refresh_pending(manager, SYNC_TIMEOUT, |_| {}).await {
         warn_sync(&error);
     }
     let conversations = backend::conversations(manager).await?;

@@ -1,7 +1,7 @@
-# Signal CLI
+# signal-cli
 
-A fast, keyboard-first Signal client for your terminal.
+a fast, keyboard-first signal client for your terminal.
 
 ```sh
-curl https://raw.githubusercontent.com/emilianscheel/signal-cli/main/install.sh -sSf | sh
+curl https://signal-cli.vercel.app/install.sh -sSf | sh
 ```

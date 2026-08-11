@@ -19,6 +19,7 @@ use crate::{
     attachments::{self, AttachmentCache, AttachmentEvent, AttachmentState},
     backend::{self, ChatMessage, Conversation, NetworkEvent},
     preferences::PreferencesStore,
+    sync::{self, LinkSyncPaths, SyncReport},
     ui::TerminalSession,
 };
 
@@ -109,7 +110,11 @@ pub struct App {
     pub terminal_width: u16,
     preferences: PreferencesStore,
     receiver: Option<tokio::task::JoinHandle<()>>,
+    network_tx: Option<mpsc::UnboundedSender<NetworkEvent>>,
+    sync_tx: Option<mpsc::UnboundedSender<Result<SyncReport, String>>>,
+    pub syncing: bool,
     disconnected: bool,
+    link_sync_paths: LinkSyncPaths,
     attachment_cache: AttachmentCache,
     pub attachment_states: HashMap<String, AttachmentState>,
     attachment_slots: Arc<tokio::sync::Semaphore>,
@@ -120,6 +125,7 @@ impl App {
         manager: Manager<SqliteStore, Registered>,
         preferences: PreferencesStore,
         attachment_cache_path: PathBuf,
+        link_sync_paths: LinkSyncPaths,
     ) -> Self {
         Self {
             manager,
@@ -139,7 +145,11 @@ impl App {
             terminal_width: 0,
             preferences,
             receiver: None,
+            network_tx: None,
+            sync_tx: None,
+            syncing: false,
             disconnected: false,
+            link_sync_paths,
             attachment_cache: AttachmentCache::new(attachment_cache_path),
             attachment_states: HashMap::new(),
             attachment_slots: Arc::new(tokio::sync::Semaphore::new(2)),
@@ -351,8 +361,73 @@ impl App {
         StateStore::clear_registration(&mut store).await?;
         ContentsStore::clear_contents(&mut store).await?;
         Store::clear(&mut store).await?;
+        self.link_sync_paths.cleanup()?;
         self.disconnected = true;
         Ok(())
+    }
+
+    async fn start_pending_sync(&mut self) {
+        if self.syncing {
+            self.status = "Sync already in progress".into();
+            return;
+        }
+        if let Some(receiver) = self.receiver.take() {
+            receiver.abort();
+            let _ = receiver.await;
+        }
+        let Some(tx) = self.sync_tx.clone() else {
+            self.status = "Sync unavailable".into();
+            return;
+        };
+        self.syncing = true;
+        self.status = "Syncing contacts and queued messages…".into();
+        let manager = self.manager.clone();
+        tokio::task::spawn_local(async move {
+            let result =
+                sync::refresh_pending(&manager, std::time::Duration::from_secs(45), |_| {})
+                    .await
+                    .map_err(|error| format!("{error:#}"));
+            let _ = tx.send(result);
+        });
+    }
+
+    async fn finish_pending_sync(&mut self, result: Result<SyncReport, String>) {
+        self.syncing = false;
+        if let Some(tx) = self.network_tx.clone() {
+            self.receiver = Some(backend::start_receiver(self.manager.clone(), tx));
+        }
+        let refresh = self.refresh_conversations().await;
+        if refresh.is_ok() && self.opened.is_some() {
+            if let Some(conversation) = self.opened_conversation().cloned() {
+                match backend::history(&self.manager, &conversation).await {
+                    Ok(messages) => self.messages = messages,
+                    Err(error) => {
+                        self.status = format!("Sync finished; chat refresh failed: {error:#}");
+                        return;
+                    }
+                }
+            }
+        }
+        match (result, refresh) {
+            (Ok(report), Ok(())) => {
+                let contacts = if report.contacts_updated {
+                    "contacts updated"
+                } else {
+                    "contacts unchanged"
+                };
+                self.status = format!(
+                    "Sync complete · {} queued message{} · {contacts}",
+                    report.received_messages,
+                    if report.received_messages == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                );
+            }
+            (Err(error), _) => self.status = format!("Sync failed: {error}"),
+            (Ok(_), Err(error)) => self.status = format!("Sync refresh failed: {error:#}"),
+        }
     }
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<bool> {
@@ -361,6 +436,13 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Ok(true);
+        }
+        if self.screen != Screen::DisconnectConfirm
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && key.code == KeyCode::Char('s')
+        {
+            self.start_pending_sync().await;
+            return Ok(false);
         }
         match self.screen {
             Screen::Conversations => match key.code {
@@ -454,14 +536,19 @@ impl App {
                 _ => {}
             },
             Screen::DisconnectConfirm => match key.code {
-                KeyCode::Char('y') => match self.disconnect().await {
-                    Ok(()) => return Ok(true),
-                    Err(error) => {
-                        self.status = format!("Disconnect failed: {error:#}");
-                        self.screen = Screen::Conversations;
+                KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    match self.disconnect().await {
+                        Ok(()) => return Ok(true),
+                        Err(error) => {
+                            self.status = format!("Disconnect failed: {error:#}");
+                            self.screen = Screen::Conversations;
+                        }
                     }
-                },
-                KeyCode::Esc | KeyCode::Char('n') => self.screen = Screen::Conversations,
+                }
+                KeyCode::Esc => self.screen = Screen::Conversations,
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.screen = Screen::Conversations
+                }
                 _ => {}
             },
         }
@@ -542,7 +629,10 @@ impl App {
         self.selected = remembered_selection(&self.conversations, remembered.as_ref());
         self.ensure_wide_chat().await?;
         let (network_tx, mut network_rx) = mpsc::unbounded_channel();
+        self.network_tx = Some(network_tx.clone());
         self.receiver = Some(backend::start_receiver(self.manager.clone(), network_tx));
+        let (sync_tx, mut sync_rx) = mpsc::unbounded_channel();
+        self.sync_tx = Some(sync_tx);
         let mut terminal = TerminalSession::start()?;
         let mut events = EventStream::new();
         let (attachment_tx, mut attachment_rx) = mpsc::unbounded_channel();
@@ -565,6 +655,7 @@ impl App {
                 },
                 Some(event) = network_rx.recv() => self.handle_network(event).await?,
                 Some(event) = attachment_rx.recv() => self.handle_attachment(event),
+                Some(result) = sync_rx.recv() => self.finish_pending_sync(result).await,
                 _ = terminal.redraw_requested(), if terminal.supports_images() => {},
             }
         }

@@ -9,7 +9,10 @@ use anyhow::Result;
 use chrono::{Local, TimeZone};
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
 };
 use ratatui::{
     backend::CrosstermBackend,
@@ -92,7 +95,9 @@ impl TerminalSession {
     pub fn start() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        // Purge the primary buffer before switching screens so terminal
+        // emulators cannot reveal pre-TUI output when the user scrolls back.
+        execute!(stdout, Clear(ClearType::Purge), EnterAlternateScreen)?;
         let picker = Picker::from_query_stdio()
             .ok()
             .filter(|picker| picker.protocol_type() != ProtocolType::Halfblocks);
@@ -680,6 +685,8 @@ fn conversation_footer(app: &App) -> Line<'_> {
         Span::styled(" move   ", muted()),
         Span::styled("enter", primary()),
         Span::styled(" open   ", muted()),
+        Span::styled("ctrl-s", primary()),
+        Span::styled(" sync   ", muted()),
         Span::styled("ctrl-r", primary()),
         Span::styled(" refresh   ", muted()),
         Span::styled("ctrl-d", primary()),
@@ -706,6 +713,8 @@ fn chat_footer(app: &App, wide: bool) -> Line<'_> {
         Span::styled(if wide { " sidebar   " } else { " chats   " }, muted()),
         Span::styled("pgup/dn", primary()),
         Span::styled(" scroll   ", muted()),
+        Span::styled("ctrl-s", primary()),
+        Span::styled(" sync   ", muted()),
         Span::styled("ctrl-c", primary()),
         Span::styled(" quit   ", muted()),
     ];
@@ -822,9 +831,9 @@ fn draw_disconnect_confirm(frame: &mut ratatui::Frame<'_>) {
     render_footer(
         frame,
         Line::from(vec![
-            Span::styled("y", Style::default().fg(Color::Red)),
+            Span::styled("ctrl-y", Style::default().fg(Color::Red)),
             Span::styled(" Disconnect and erase local data   ", muted()),
-            Span::styled("esc/n", primary()),
+            Span::styled("esc/ctrl-n", primary()),
             Span::styled(" Cancel", muted()),
         ]),
         footer,
