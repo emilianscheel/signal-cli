@@ -28,7 +28,7 @@ use ratatui_image::{
     thread::{ResizeRequest, ResizeResponse, ThreadImage, ThreadProtocol},
     Resize,
 };
-use unicode_width::UnicodeWidthChar;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, LayoutMode, Screen},
@@ -240,7 +240,62 @@ fn render_chat_header(frame: &mut ratatui::Frame<'_>, app: &App, area: Rect, wit
     );
 }
 
-fn conversation_list(app: &App, wide: bool, focused: bool) -> List<'static> {
+fn truncated_to_width(value: &str, width: usize) -> String {
+    let mut truncated = String::new();
+    let mut used = 0;
+    for character in value.chars() {
+        let character_width = character.width().unwrap_or(0);
+        if used + character_width > width {
+            break;
+        }
+        truncated.push(character);
+        used += character_width;
+    }
+    truncated
+}
+
+fn conversation_title_spans(
+    title: &str,
+    selected: bool,
+    unread_count: u32,
+    available_width: usize,
+) -> Vec<Span<'static>> {
+    let prefix = if selected { "› " } else { "  " };
+    let badge = (unread_count > 0).then(|| format!(" +{unread_count}"));
+    let title_width = available_width
+        .saturating_sub(prefix.width() + badge.as_deref().map(UnicodeWidthStr::width).unwrap_or(0));
+    let title_style = if selected {
+        Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
+    } else {
+        primary().add_modifier(Modifier::BOLD)
+    };
+    let mut spans = vec![
+        Span::styled(
+            prefix,
+            if selected {
+                Style::default().fg(ACCENT)
+            } else {
+                primary()
+            },
+        ),
+        Span::styled(truncated_to_width(title, title_width), title_style),
+    ];
+    if let Some(badge) = badge {
+        spans.push(Span::styled(
+            badge,
+            Style::default().fg(Color::White).bg(ACCENT),
+        ));
+    }
+    spans
+}
+
+fn conversation_list(app: &App, wide: bool, focused: bool, area_width: u16) -> List<'static> {
+    let horizontal_padding = if wide { 2 } else { 4 };
+    let available_width = usize::from(
+        area_width
+            .saturating_sub(horizontal_padding)
+            .saturating_sub(u16::from(wide)),
+    );
     let content = if app.conversations.is_empty() {
         vec![ListItem::new(Text::from(vec![
             Line::from("No conversations synced yet"),
@@ -263,24 +318,12 @@ fn conversation_list(app: &App, wide: bool, focused: bool) -> List<'static> {
                     let chat = &app.conversations[index];
                     let selected = index == app.selected;
                     ListItem::new(Text::from(vec![
-                        Line::from(vec![
-                            Span::styled(
-                                if selected { "› " } else { "  " },
-                                if selected {
-                                    Style::default().fg(ACCENT)
-                                } else {
-                                    primary()
-                                },
-                            ),
-                            Span::styled(
-                                chat.title.clone(),
-                                if selected {
-                                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
-                                } else {
-                                    primary().add_modifier(Modifier::BOLD)
-                                },
-                            ),
-                        ]),
+                        Line::from(conversation_title_spans(
+                            &chat.title,
+                            selected,
+                            app.unread_count(&chat.id),
+                            available_width,
+                        )),
                         Line::from(vec![
                             Span::raw("  "),
                             Span::styled(chat.subtitle.clone(), muted()),
@@ -358,7 +401,7 @@ fn render_conversation_list(
     wide: bool,
     focused: bool,
 ) {
-    let list = conversation_list(app, wide, focused);
+    let list = conversation_list(app, wide, focused, area.width);
     let selected = app.filtered_selection();
     let mut state = ListState::default()
         .with_offset(app.sidebar_offset)
@@ -685,8 +728,6 @@ fn conversation_footer(app: &App) -> Line<'_> {
         Span::styled(" move   ", muted()),
         Span::styled("enter", primary()),
         Span::styled(" open   ", muted()),
-        Span::styled("ctrl-s", primary()),
-        Span::styled(" sync   ", muted()),
         Span::styled("ctrl-r", primary()),
         Span::styled(" refresh   ", muted()),
         Span::styled("ctrl-d", primary()),
@@ -716,8 +757,6 @@ fn chat_footer(app: &App, wide: bool) -> Line<'_> {
         Span::styled(if wide { " sidebar   " } else { " chats   " }, muted()),
         Span::styled("pgup/dn", primary()),
         Span::styled(" scroll   ", muted()),
-        Span::styled("ctrl-s", primary()),
-        Span::styled(" sync   ", muted()),
         Span::styled("ctrl-c", primary()),
         Span::styled(" quit   ", muted()),
     ];
@@ -870,8 +909,8 @@ fn wrap_text(input: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        friendly_type, human_size, image_failure, image_height, muted, primary, shell,
-        status_spans, wide_columns, wrap_text, SIDEBAR_WIDTH,
+        conversation_title_spans, friendly_type, human_size, image_failure, image_height, muted,
+        primary, shell, status_spans, wide_columns, wrap_text, ACCENT, SIDEBAR_WIDTH,
     };
     use crate::backend::ChatAttachment;
     use presage::libsignal_service::proto::AttachmentPointer;
@@ -917,6 +956,15 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert_eq!(rendered, "● Connected");
+    }
+
+    #[test]
+    fn unread_badge_stays_visible_after_long_titles() {
+        let spans = conversation_title_spans("Charlotte Example", false, 12, 8);
+        assert_eq!(spans[1].content, "Ch");
+        assert_eq!(spans[2].content, " +12");
+        assert_eq!(spans[2].style.fg, Some(Color::White));
+        assert_eq!(spans[2].style.bg, Some(ACCENT));
     }
 
     #[test]

@@ -203,7 +203,6 @@ bytes.
 | Chat       | `Enter`                 | Send the current message                 |
 | Chat       | `PageUp`/`PageDown`     | Scroll message history                   |
 | Chat       | `Esc`                   | Return to the chat list                  |
-| Chats/Chat | `Ctrl-S`                | Refresh contacts and queued messages     |
 | Anywhere   | `Ctrl-C`                | Quit safely                              |
 
 At widths of 120 columns or more, chats remain visible in a fixed 32-column
@@ -211,6 +210,11 @@ sidebar. Press `Esc` to focus the sidebar, type to filter chats, move with the
 arrow keys, and press `Enter` to open the highlighted chat and return focus to
 the composer. Narrower terminals retain the separate chat-list and chat
 screens. The last opened chat is remembered in a private local preference file.
+
+The interactive interface checks for queued Signal messages automatically while
+it is open. New incoming messages in other chats receive a blue `+n` badge in
+the sidebar until that chat is opened; these counts reset when the interface
+closes.
 
 ## Security and scope
 

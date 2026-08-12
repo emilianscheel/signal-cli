@@ -34,7 +34,7 @@ use presage_store_sqlite::SqliteStore;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::backend::{self, NetworkEvent};
+use crate::backend::{self, ConversationId, NetworkEvent};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkSyncState {
@@ -67,6 +67,7 @@ pub enum SyncProgress {
 pub struct SyncReport {
     pub imported_messages: u64,
     pub received_messages: u64,
+    pub incoming_conversations: Vec<ConversationId>,
     pub contacts_updated: bool,
 }
 
@@ -810,7 +811,15 @@ where
         let mut queue_empty = false;
         while let Some(event) = rx.recv().await {
             match event {
-                NetworkEvent::Message(_) => report.received_messages += 1,
+                NetworkEvent::Message {
+                    conversation,
+                    incoming,
+                } => {
+                    report.received_messages += 1;
+                    if incoming {
+                        report.incoming_conversations.push(conversation);
+                    }
+                }
                 NetworkEvent::ConversationsChanged => report.contacts_updated = true,
                 NetworkEvent::QueueEmpty => queue_empty = true,
                 NetworkEvent::Error(error) => bail!(error),

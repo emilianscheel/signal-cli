@@ -214,10 +214,20 @@ pub struct ChatMessage {
 
 #[derive(Debug)]
 pub enum NetworkEvent {
-    Message(ConversationId),
+    Message {
+        conversation: ConversationId,
+        incoming: bool,
+    },
     ConversationsChanged,
     QueueEmpty,
     Error(String),
+}
+
+fn is_incoming_message(body: &ContentBody) -> bool {
+    !matches!(
+        body,
+        ContentBody::SynchronizeMessage(sync) if sync.sent.is_some()
+    )
 }
 
 fn transparent_qr(value: &str) -> Result<String> {
@@ -645,12 +655,21 @@ pub fn start_receiver(
         futures::pin_mut!(stream);
         while let Some(received) = stream.next().await {
             let event = match received {
-                Received::Content(content) => Thread::try_from(content.as_ref())
-                    .map(|thread| match thread {
-                        Thread::Contact(id) => NetworkEvent::Message(ConversationId::Contact(id)),
-                        Thread::Group(key) => NetworkEvent::Message(ConversationId::Group(key)),
-                    })
-                    .unwrap_or_else(|error| NetworkEvent::Error(error.to_string())),
+                Received::Content(content) => {
+                    let incoming = is_incoming_message(&content.body);
+                    Thread::try_from(content.as_ref())
+                        .map(|thread| match thread {
+                            Thread::Contact(id) => NetworkEvent::Message {
+                                conversation: ConversationId::Contact(id),
+                                incoming,
+                            },
+                            Thread::Group(key) => NetworkEvent::Message {
+                                conversation: ConversationId::Group(key),
+                                incoming,
+                            },
+                        })
+                        .unwrap_or_else(|error| NetworkEvent::Error(error.to_string()))
+                }
                 Received::Contacts => NetworkEvent::ConversationsChanged,
                 Received::QueueEmpty => NetworkEvent::QueueEmpty,
             };
@@ -673,8 +692,8 @@ mod tests {
 
     use super::{
         chat_attachments, contact_title, content_attachment_pointers, data_message_body,
-        enable_history_transfer, group_title, matching_conversations, transparent_qr, Conversation,
-        ConversationId, MessageKind,
+        enable_history_transfer, group_title, is_incoming_message, matching_conversations,
+        transparent_qr, Conversation, ConversationId, MessageKind,
     };
 
     fn valid_pointer(byte: u8) -> AttachmentPointer {
@@ -814,6 +833,8 @@ mod tests {
             content_attachment_pointers(&outgoing),
             Some([pointer].as_slice())
         );
+        assert!(!is_incoming_message(&outgoing));
+        assert!(is_incoming_message(&incoming));
     }
 
     #[test]

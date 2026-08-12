@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     attachments::{self, AttachmentCache, AttachmentEvent, AttachmentState},
-    backend::{self, ChatMessage, Conversation, NetworkEvent},
+    backend::{self, ChatMessage, Conversation},
     preferences::PreferencesStore,
     sync::{self, LinkSyncPaths, SyncReport},
     ui::TerminalSession,
@@ -61,6 +61,27 @@ fn moved_selection(indices: &[usize], selected: usize, down: bool) -> Option<usi
         current.saturating_sub(1)
     };
     indices.get(next).copied()
+}
+
+fn unread_count_for(
+    counts: &[(backend::ConversationId, u32)],
+    id: &backend::ConversationId,
+) -> u32 {
+    counts
+        .iter()
+        .find_map(|(conversation, count)| (conversation == id).then_some(*count))
+        .unwrap_or(0)
+}
+
+fn increment_unread(counts: &mut Vec<(backend::ConversationId, u32)>, id: backend::ConversationId) {
+    if let Some((_, count)) = counts
+        .iter_mut()
+        .find(|(conversation, _)| conversation == &id)
+    {
+        *count = count.saturating_add(1);
+    } else {
+        counts.push((id, 1));
+    }
 }
 
 impl LayoutMode {
@@ -110,10 +131,9 @@ pub struct App {
     pub sending: bool,
     pub terminal_width: u16,
     preferences: PreferencesStore,
-    receiver: Option<tokio::task::JoinHandle<()>>,
-    network_tx: Option<mpsc::UnboundedSender<NetworkEvent>>,
     sync_tx: Option<mpsc::UnboundedSender<Result<SyncReport, String>>>,
     pub syncing: bool,
+    unread_counts: Vec<(backend::ConversationId, u32)>,
     disconnected: bool,
     link_sync_paths: LinkSyncPaths,
     attachment_cache: AttachmentCache,
@@ -149,10 +169,9 @@ impl App {
             sending: false,
             terminal_width: 0,
             preferences,
-            receiver: None,
-            network_tx: None,
             sync_tx: None,
             syncing: false,
+            unread_counts: Vec::new(),
             disconnected: false,
             link_sync_paths,
             attachment_cache: AttachmentCache::new(attachment_cache_path),
@@ -261,6 +280,22 @@ impl App {
             .find(|conversation| &conversation.id == opened)
     }
 
+    pub fn unread_count(&self, id: &backend::ConversationId) -> u32 {
+        unread_count_for(&self.unread_counts, id)
+    }
+
+    fn clear_unread(&mut self, id: &backend::ConversationId) {
+        self.unread_counts
+            .retain(|(conversation, _)| conversation != id);
+    }
+
+    fn record_incoming_message(&mut self, id: backend::ConversationId) {
+        if self.opened.as_ref().is_some_and(|opened| opened == &id) {
+            return;
+        }
+        increment_unread(&mut self.unread_counts, id);
+    }
+
     pub const fn layout_mode(&self) -> LayoutMode {
         LayoutMode::for_width(self.terminal_width)
     }
@@ -289,6 +324,11 @@ impl App {
         if self.opened.is_none() {
             self.messages.clear();
         }
+        self.unread_counts.retain(|(id, _)| {
+            self.conversations
+                .iter()
+                .any(|conversation| &conversation.id == id)
+        });
         Ok(())
     }
 
@@ -301,6 +341,7 @@ impl App {
         self.messages = backend::history(&self.manager, &conversation).await?;
         self.retain_current_attachment_states();
         self.opened = Some(conversation.id.clone());
+        self.clear_unread(&conversation.id);
         self.scroll = 0;
         if focus_chat {
             self.screen = Screen::Chat;
@@ -357,10 +398,6 @@ impl App {
     }
 
     async fn disconnect(&mut self) -> Result<()> {
-        if let Some(receiver) = self.receiver.take() {
-            receiver.abort();
-            let _ = receiver.await;
-        }
         let mut store = self.manager.store().clone();
 
         // Secondary Signal devices cannot revoke themselves server-side. Remove
@@ -377,10 +414,6 @@ impl App {
         if self.syncing {
             self.status = "Sync already in progress".into();
             return;
-        }
-        if let Some(receiver) = self.receiver.take() {
-            receiver.abort();
-            let _ = receiver.await;
         }
         let Some(tx) = self.sync_tx.clone() else {
             self.status = "Sync unavailable".into();
@@ -400,8 +433,10 @@ impl App {
 
     async fn finish_pending_sync(&mut self, result: Result<SyncReport, String>) {
         self.syncing = false;
-        if let Some(tx) = self.network_tx.clone() {
-            self.receiver = Some(backend::start_receiver(self.manager.clone(), tx));
+        if let Ok(report) = &result {
+            for conversation in &report.incoming_conversations {
+                self.record_incoming_message(conversation.clone());
+            }
         }
         let refresh = self.refresh_conversations().await;
         if refresh.is_ok() && self.opened.is_some() {
@@ -443,13 +478,6 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Ok(true);
-        }
-        if self.screen != Screen::DisconnectConfirm
-            && key.modifiers.contains(KeyModifiers::CONTROL)
-            && key.code == KeyCode::Char('s')
-        {
-            self.start_pending_sync().await;
-            return Ok(false);
         }
         match self.screen {
             Screen::Conversations => match key.code {
@@ -562,31 +590,6 @@ impl App {
         Ok(false)
     }
 
-    async fn handle_network(&mut self, event: NetworkEvent) -> Result<()> {
-        match event {
-            NetworkEvent::Message(id) => {
-                if self.opened.as_ref().is_some_and(|opened| opened == &id) {
-                    let conversation = self
-                        .opened_conversation()
-                        .cloned()
-                        .expect("opened chat exists");
-                    self.messages = backend::history(&self.manager, &conversation).await?;
-                    self.retain_current_attachment_states();
-                    self.scroll = 0;
-                }
-                self.status = "New message".into();
-            }
-            NetworkEvent::ConversationsChanged => {
-                self.refresh_conversations().await?;
-                self.ensure_wide_chat().await?;
-                self.status = "Contacts synced".into();
-            }
-            NetworkEvent::QueueEmpty => self.status = "Connected".into(),
-            NetworkEvent::Error(error) => self.status = error,
-        }
-        Ok(())
-    }
-
     fn queue_visible_images(
         &mut self,
         keys: Vec<String>,
@@ -635,13 +638,12 @@ impl App {
         self.refresh_conversations().await?;
         self.selected = remembered_selection(&self.conversations, remembered.as_ref());
         self.ensure_wide_chat().await?;
-        let (network_tx, mut network_rx) = mpsc::unbounded_channel();
-        self.network_tx = Some(network_tx.clone());
-        self.receiver = Some(backend::start_receiver(self.manager.clone(), network_tx));
         let (sync_tx, mut sync_rx) = mpsc::unbounded_channel();
         self.sync_tx = Some(sync_tx);
         let mut terminal = TerminalSession::start()?;
         let mut events = EventStream::new();
+        let mut sync_interval = tokio::time::interval(std::time::Duration::from_secs(1));
+        sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let (attachment_tx, mut attachment_rx) = mpsc::unbounded_channel();
         let (update_tx, mut update_rx) = mpsc::unbounded_channel();
         if let Some(monitor) = self.update_monitor.take() {
@@ -672,9 +674,9 @@ impl App {
                     None => break,
                     _ => {}
                 },
-                Some(event) = network_rx.recv() => self.handle_network(event).await?,
                 Some(event) = attachment_rx.recv() => self.handle_attachment(event),
                 Some(result) = sync_rx.recv() => self.finish_pending_sync(result).await,
+                _ = sync_interval.tick(), if !self.syncing => self.start_pending_sync().await,
                 Some(notice) = update_rx.recv() => {
                     self.update_notice = Some(notice);
                     update_notice_deadline = Some(tokio::time::Instant::now() + std::time::Duration::from_secs(8));
@@ -698,8 +700,8 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::{
-        matching_conversation_indices, moved_selection, reconciled_selection, remembered_selection,
-        LayoutMode, Screen, WIDE_BREAKPOINT,
+        increment_unread, matching_conversation_indices, moved_selection, reconciled_selection,
+        remembered_selection, unread_count_for, LayoutMode, Screen, WIDE_BREAKPOINT,
     };
     use crate::backend::{Conversation, ConversationId};
 
@@ -789,5 +791,22 @@ mod tests {
         assert_eq!(moved_selection(&matches, 5, true), Some(5));
         assert_eq!(moved_selection(&matches, 3, false), Some(1));
         assert_eq!(moved_selection(&matches, 1, false), Some(1));
+    }
+
+    #[test]
+    fn unread_counts_accumulate_and_clear_per_conversation() {
+        let first = ConversationId::Group([1; 32]);
+        let second = ConversationId::Group([2; 32]);
+        let mut counts = Vec::new();
+
+        increment_unread(&mut counts, first.clone());
+        increment_unread(&mut counts, first.clone());
+        increment_unread(&mut counts, second.clone());
+        assert_eq!(unread_count_for(&counts, &first), 2);
+        assert_eq!(unread_count_for(&counts, &second), 1);
+
+        counts.retain(|(conversation, _)| conversation != &first);
+        assert_eq!(unread_count_for(&counts, &first), 0);
+        assert_eq!(unread_count_for(&counts, &second), 1);
     }
 }
