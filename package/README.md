@@ -253,5 +253,7 @@ AGPL-3.0-only.
 ## Release
 
 ```sh
-./release.sh
+./release.sh --patch
+# or: ./release.sh --minor
+# or: ./release.sh --major
 ```
