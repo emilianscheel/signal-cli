@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     ops::Range,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -334,12 +335,14 @@ pub async fn conversations(
         let id = ServiceId::Aci(uuid.into());
         let phone_number = phone_number.map(|number| number.to_string());
         let title = contact_title(name, phone_number.clone());
-        result.push(Conversation {
+        let conversation = Conversation {
             id: ConversationId::Contact(id),
             title,
             subtitle: phone_number.unwrap_or_else(|| "Signal contact".into()),
             group_revision: None,
-        });
+        };
+        let latest_message = latest_message_timestamp(manager, &conversation).await?;
+        result.push((conversation, latest_message));
     }
 
     for group in manager.store().groups().await?.flatten() {
@@ -352,16 +355,47 @@ pub async fn conversations(
                 ..
             },
         ) = group;
-        result.push(Conversation {
+        let conversation = Conversation {
             id: ConversationId::Group(key),
             title: group_title(title),
             subtitle: format!("{} members", members.len()),
             group_revision: Some(revision),
-        });
+        };
+        let latest_message = latest_message_timestamp(manager, &conversation).await?;
+        result.push((conversation, latest_message));
     }
 
-    result.sort_by_key(|conversation| conversation.title.to_lowercase());
-    Ok(result)
+    result.sort_by(conversation_activity_order);
+    Ok(result
+        .into_iter()
+        .map(|(conversation, _)| conversation)
+        .collect())
+}
+
+async fn latest_message_timestamp(
+    manager: &Manager<SqliteStore, Registered>,
+    conversation: &Conversation,
+) -> Result<Option<u64>> {
+    Ok(latest_messages(manager, conversation, None, None, 1)
+        .await?
+        .first()
+        .map(|message| message.timestamp))
+}
+
+fn conversation_activity_order(
+    left: &(Conversation, Option<u64>),
+    right: &(Conversation, Option<u64>),
+) -> Ordering {
+    right.1.cmp(&left.1).then_with(|| {
+        let left_phone = left.0.title.trim_start().starts_with('+');
+        let right_phone = right.0.title.trim_start().starts_with('+');
+        left_phone.cmp(&right_phone).then_with(|| {
+            left.0
+                .title
+                .to_lowercase()
+                .cmp(&right.0.title.to_lowercase())
+        })
+    })
 }
 
 pub async fn history(
@@ -691,9 +725,9 @@ mod tests {
     };
 
     use super::{
-        chat_attachments, contact_title, content_attachment_pointers, data_message_body,
-        enable_history_transfer, group_title, is_incoming_message, matching_conversations,
-        transparent_qr, Conversation, ConversationId, MessageKind,
+        chat_attachments, contact_title, content_attachment_pointers, conversation_activity_order,
+        data_message_body, enable_history_transfer, group_title, is_incoming_message,
+        matching_conversations, transparent_qr, Conversation, ConversationId, MessageKind,
     };
 
     fn valid_pointer(byte: u8) -> AttachmentPointer {
@@ -762,6 +796,33 @@ mod tests {
         assert_eq!(
             matching_conversations(&conversations, &conversations[0].id.stable_id()).len(),
             1
+        );
+    }
+
+    #[test]
+    fn conversations_sort_by_latest_message_then_names_before_phone_numbers() {
+        let conversation = |id: u8, title: &str| Conversation {
+            id: ConversationId::Group([id; 32]),
+            title: title.into(),
+            subtitle: String::new(),
+            group_revision: Some(1),
+        };
+        let mut conversations = vec![
+            (conversation(1, "+4915253429834"), Some(20)),
+            (conversation(2, "Zoe"), Some(20)),
+            (conversation(3, "Alex"), Some(20)),
+            (conversation(4, "Older"), Some(10)),
+            (conversation(5, "No messages"), None),
+        ];
+
+        conversations.sort_by(conversation_activity_order);
+        let titles = conversations
+            .iter()
+            .map(|(conversation, _)| conversation.title.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            titles,
+            vec!["Alex", "Zoe", "+4915253429834", "Older", "No messages"]
         );
     }
 

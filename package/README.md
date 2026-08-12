@@ -22,6 +22,7 @@ Code.
 - Human-readable date filters and JSON output for automation
 - Unicode editing and keyboard-only navigation
 - Responsive 32-column chat sidebar in terminals 120 columns or wider
+- Sidebar ordering by unread count, newest message, then name
 - Last-opened chat restoration across launches
 - Restrictive default `0700` data-directory and `0600` database permissions on Unix
 

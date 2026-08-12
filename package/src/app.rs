@@ -1,4 +1,5 @@
 use std::{
+    cmp::Reverse,
     collections::{HashMap, HashSet},
     path::PathBuf,
     sync::Arc,
@@ -82,6 +83,14 @@ fn increment_unread(counts: &mut Vec<(backend::ConversationId, u32)>, id: backen
     } else {
         counts.push((id, 1));
     }
+}
+
+fn sort_conversations_by_unread(
+    conversations: &mut [Conversation],
+    unread_counts: &[(backend::ConversationId, u32)],
+) {
+    conversations
+        .sort_by_key(|conversation| Reverse(unread_count_for(unread_counts, &conversation.id)));
 }
 
 impl LayoutMode {
@@ -304,6 +313,12 @@ impl App {
         let selected = self.conversations.get(self.selected).map(|c| c.id.clone());
         let opened = self.opened.clone();
         self.conversations = backend::conversations(&self.manager).await?;
+        self.unread_counts.retain(|(id, _)| {
+            self.conversations
+                .iter()
+                .any(|conversation| &conversation.id == id)
+        });
+        sort_conversations_by_unread(&mut self.conversations, &self.unread_counts);
         if let Some(id) = selected {
             self.selected = self
                 .conversations
@@ -324,11 +339,6 @@ impl App {
         if self.opened.is_none() {
             self.messages.clear();
         }
-        self.unread_counts.retain(|(id, _)| {
-            self.conversations
-                .iter()
-                .any(|conversation| &conversation.id == id)
-        });
         Ok(())
     }
 
@@ -701,7 +711,8 @@ impl App {
 mod tests {
     use super::{
         increment_unread, matching_conversation_indices, moved_selection, reconciled_selection,
-        remembered_selection, unread_count_for, LayoutMode, Screen, WIDE_BREAKPOINT,
+        remembered_selection, sort_conversations_by_unread, unread_count_for, LayoutMode, Screen,
+        WIDE_BREAKPOINT,
     };
     use crate::backend::{Conversation, ConversationId};
 
@@ -808,5 +819,34 @@ mod tests {
         counts.retain(|(conversation, _)| conversation != &first);
         assert_eq!(unread_count_for(&counts, &first), 0);
         assert_eq!(unread_count_for(&counts, &second), 1);
+    }
+
+    #[test]
+    fn unread_chats_sort_before_newer_read_chats() {
+        let first = Conversation {
+            id: ConversationId::Group([1; 32]),
+            title: "Newest".into(),
+            subtitle: String::new(),
+            group_revision: Some(1),
+        };
+        let second = Conversation {
+            id: ConversationId::Group([2; 32]),
+            title: "Older unread".into(),
+            subtitle: String::new(),
+            group_revision: Some(1),
+        };
+        let third = Conversation {
+            id: ConversationId::Group([3; 32]),
+            title: "Newest unread".into(),
+            subtitle: String::new(),
+            group_revision: Some(1),
+        };
+        let unread = vec![(second.id.clone(), 1), (third.id.clone(), 2)];
+        let mut conversations = vec![first, third, second];
+
+        sort_conversations_by_unread(&mut conversations, &unread);
+        assert_eq!(conversations[0].title, "Newest unread");
+        assert_eq!(conversations[1].title, "Older unread");
+        assert_eq!(conversations[2].title, "Newest");
     }
 }
