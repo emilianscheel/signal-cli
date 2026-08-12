@@ -807,7 +807,7 @@ mod tests {
             subtitle: String::new(),
             group_revision: Some(1),
         };
-        let mut conversations = vec![
+        let mut conversations = [
             (conversation(1, "+4915253429834"), Some(20)),
             (conversation(2, "Zoe"), Some(20)),
             (conversation(3, "Alex"), Some(20)),
